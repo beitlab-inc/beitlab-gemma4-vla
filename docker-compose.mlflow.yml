@@ -1,0 +1,47 @@
+name: gemma4-vla-mlflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - mlflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow
+      MLFLOW_ARTIFACTS_DESTINATION: /mlflow/artifacts
+    command:
+      - sh
+      - -c
+      - >
+        mlflow server
+        --backend-store-uri "$$MLFLOW_BACKEND_STORE_URI"
+        --serve-artifacts
+        --artifacts-destination "$$MLFLOW_ARTIFACTS_DESTINATION"
+        --host 0.0.0.0
+        --port 5000
+    ports:
+      - "5001:5000"
+    volumes:
+      - mlflow-artifacts:/mlflow/artifacts
+    restart: unless-stopped
+
+volumes:
+  mlflow-postgres-data:
+  mlflow-artifacts:

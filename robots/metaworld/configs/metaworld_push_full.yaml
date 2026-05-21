@@ -1,0 +1,51 @@
+# ================================================================
+# Strategy 3: Full Fine-tuning (maximum capacity)
+# ================================================================
+# All parameters train: vision tower, backbone, and action expert.
+# Maximum capacity but needs large datasets and serious hardware.
+#
+# VRAM:  ~40 GB+ (use gradient checkpointing to reduce)
+# Data:  50K+ demos recommended
+# GPU:   A100 (40/80GB) or H100
+#
+# Run:
+#   uv run python -m robots.metaworld.scripts.train \
+#       --config robots/metaworld/configs/metaworld_push_full.yaml \
+#       --data-dir data/metaworld_demos
+
+vision:
+  num_cameras: 1
+  image_size: 224
+  freeze_vision: false         # vision tower trains too
+
+backbone:
+  model_name: "google/gemma-4-E2B-it"
+  freeze_backbone: false       # everything unfrozen
+  use_lora: false              # full weights, no adapters
+
+action_expert:
+  hidden_size: 1024
+  num_layers: 8
+  num_heads: 16
+
+flow_matching:
+  action_horizon: 50
+  num_inference_steps: 10
+
+robot:
+  name: "metaworld-push"
+  state_dim: 39
+  action_dim: 4
+  max_state_dim: 39
+
+training:
+  learning_rate: 0.00005       # lower LR for full fine-tune stability
+  backbone_lr_multiplier: 0.01 # backbone trains 100x slower than expert
+  batch_size: 8
+  grad_accum_steps: 4          # effective batch = 32
+  gradient_checkpointing: true # saves ~8 GB VRAM
+  max_steps: 100000
+  warmup_steps: 2000
+  mixed_precision: "bf16"
+  output_dir: "./checkpoints/metaworld_push_full"
+  dataset_root: "./data/metaworld_demos"

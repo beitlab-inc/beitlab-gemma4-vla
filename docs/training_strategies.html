@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemma4VLA Training Strategies</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --cyan: #79c0ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem;
+    line-height: 1.6;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.8rem;
+    margin-bottom: 0.3rem;
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--muted);
+    margin-bottom: 2.5rem;
+    font-size: 0.95rem;
+  }
+
+  /* ── Architecture diagram ── */
+  .arch-section {
+    max-width: 800px;
+    margin: 0 auto 3rem;
+  }
+  .arch-section h2 {
+    font-size: 1.2rem;
+    margin-bottom: 1rem;
+    color: var(--cyan);
+  }
+  .arch {
+    display: flex;
+    gap: 1rem;
+    align-items: stretch;
+  }
+  .arch-block {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+    background: var(--card);
+    position: relative;
+  }
+  .arch-block h3 {
+    font-size: 0.95rem;
+    margin-bottom: 0.6rem;
+  }
+  .arch-block .params {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 0.8rem;
+  }
+  .arch-block ul {
+    list-style: none;
+    font-size: 0.85rem;
+  }
+  .arch-block ul li {
+    padding: 0.15rem 0;
+    color: var(--muted);
+  }
+  .arch-block.vision { border-left: 3px solid var(--purple); }
+  .arch-block.backbone { border-left: 3px solid var(--blue); }
+  .arch-block.expert { border-left: 3px solid var(--green); }
+  .arch-arrow {
+    display: flex;
+    align-items: center;
+    font-size: 1.4rem;
+    color: var(--muted);
+  }
+
+  /* ── Strategy comparison ── */
+  .strategies {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.2rem;
+    max-width: 1100px;
+    margin: 0 auto 3rem;
+  }
+  .strategy {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.5rem;
+    background: var(--card);
+    position: relative;
+  }
+  .strategy.recommended {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(63, 185, 80, 0.1);
+  }
+  .strategy.recommended::after {
+    content: "RECOMMENDED START";
+    position: absolute;
+    top: -10px;
+    right: 16px;
+    background: var(--green);
+    color: #000;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.05em;
+  }
+  .strategy h3 {
+    font-size: 1.1rem;
+    margin-bottom: 0.3rem;
+  }
+  .strategy .tag {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 1rem;
+  }
+  .tag.easy { background: rgba(63,185,80,0.15); color: var(--green); }
+  .tag.medium { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .tag.hard { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  .what-trains {
+    margin-bottom: 1rem;
+    padding: 0.8rem;
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+  .what-trains .label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 0.4rem;
+  }
+  .train-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.15rem 0;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot.frozen { background: var(--muted); opacity: 0.4; }
+  .dot.trains { background: var(--green); }
+  .dot.lora { background: var(--yellow); }
+  .train-label { font-size: 0.82rem; }
+  .train-label.frozen { color: var(--muted); text-decoration: line-through; opacity: 0.6; }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .metric {
+    padding: 0.5rem;
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px;
+  }
+  .metric .metric-label {
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .metric .metric-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .metric .metric-value.green { color: var(--green); }
+  .metric .metric-value.yellow { color: var(--yellow); }
+  .metric .metric-value.red { color: var(--red); }
+
+  .pros-cons { margin-top: 0.8rem; }
+  .pros-cons h4 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.3rem;
+  }
+  .pros-cons h4.pro { color: var(--green); }
+  .pros-cons h4.con { color: var(--red); }
+  .pros-cons ul {
+    list-style: none;
+    margin-bottom: 0.6rem;
+  }
+  .pros-cons ul li {
+    font-size: 0.82rem;
+    padding: 0.12rem 0;
+    color: var(--muted);
+  }
+  .pros-cons ul li::before {
+    margin-right: 0.4rem;
+  }
+  .pros-cons .pro-list li::before { content: "+"; color: var(--green); font-weight: 700; }
+  .pros-cons .con-list li::before { content: "-"; color: var(--red); font-weight: 700; }
+
+  /* ── Decision flow ── */
+  .decision-section {
+    max-width: 800px;
+    margin: 0 auto 2rem;
+  }
+  .decision-section h2 {
+    font-size: 1.2rem;
+    margin-bottom: 1rem;
+    color: var(--cyan);
+  }
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+  }
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .flow-node {
+    width: 240px;
+    padding: 0.8rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .flow-node.question {
+    background: rgba(88, 166, 255, 0.1);
+    border: 1px solid var(--blue);
+    color: var(--blue);
+    font-weight: 600;
+  }
+  .flow-node.answer {
+    background: rgba(63, 185, 80, 0.1);
+    border: 1px solid var(--green);
+    color: var(--green);
+    width: 200px;
+  }
+  .flow-arrow {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 0.3rem 0;
+    margin-left: 100px;
+  }
+  .flow-arrow .arr { font-size: 1rem; }
+  .flow-branch {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-left: 2rem;
+  }
+  .flow-label {
+    font-size: 0.78rem;
+    color: var(--muted);
+    min-width: 40px;
+  }
+
+  /* ── Memory table ── */
+  .memory-section {
+    max-width: 800px;
+    margin: 0 auto 2rem;
+  }
+  .memory-section h2 {
+    font-size: 1.2rem;
+    margin-bottom: 1rem;
+    color: var(--cyan);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+  th, td {
+    padding: 0.6rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  td.green { color: var(--green); }
+  td.yellow { color: var(--yellow); }
+  td.red { color: var(--red); }
+  .bar-cell {
+    width: 200px;
+  }
+  .bar {
+    height: 14px;
+    border-radius: 3px;
+    position: relative;
+  }
+  .bar.green { background: var(--green); }
+  .bar.yellow { background: var(--yellow); }
+  .bar.red { background: var(--red); }
+  .bar-limit {
+    position: absolute;
+    height: 22px;
+    top: -4px;
+    border-left: 2px dashed var(--red);
+    opacity: 0.6;
+  }
+  .bar-label {
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* ── Bottom line ── */
+  .bottomline {
+    max-width: 800px;
+    margin: 2rem auto;
+    padding: 1.5rem;
+    background: rgba(63,185,80,0.06);
+    border: 1px solid rgba(63,185,80,0.2);
+    border-radius: 10px;
+  }
+  .bottomline h2 {
+    color: var(--green);
+    font-size: 1.1rem;
+    margin-bottom: 0.8rem;
+  }
+  .bottomline p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+  }
+  .bottomline strong { color: var(--text); }
+
+  @media (max-width: 900px) {
+    .strategies { grid-template-columns: 1fr; }
+    .arch { flex-direction: column; }
+    .arch-arrow { justify-content: center; transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+
+<h1>Gemma4VLA Training Strategies</h1>
+<p class="subtitle">Which parts of the model to train — and when each strategy makes sense</p>
+
+<!-- Architecture overview -->
+<div class="arch-section">
+  <h2>Model Architecture (what can be trained)</h2>
+  <div class="arch">
+    <div class="arch-block vision">
+      <h3>Vision Tower</h3>
+      <div class="params">SigLIP2 &middot; ~400M params</div>
+      <ul>
+        <li>Image patch extraction</li>
+        <li>2520 patches per image</li>
+        <li>Pre-trained on web images</li>
+      </ul>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-block backbone">
+      <h3>Gemma 4 Backbone</h3>
+      <div class="params">E2B &middot; ~3B params</div>
+      <ul>
+        <li>Multimodal fusion</li>
+        <li>Language understanding</li>
+        <li>Instruction following</li>
+        <li>Scene reasoning</li>
+      </ul>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-block expert">
+      <h3>Action Expert</h3>
+      <div class="params">Custom &middot; ~100M params</div>
+      <ul>
+        <li>Cross-attends to backbone</li>
+        <li>Flow matching denoiser</li>
+        <li>Outputs action trajectory</li>
+        <li>Robot-specific</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Three strategies -->
+<div class="strategies">
+
+  <!-- Strategy 1: Action Expert Only -->
+  <div class="strategy recommended">
+    <h3>Action Expert Only</h3>
+    <span class="tag easy">Low Compute</span>
+
+    <div class="what-trains">
+      <div class="label">What trains</div>
+      <div class="train-row"><div class="dot frozen"></div><span class="train-label frozen">Vision Tower (frozen)</span></div>
+      <div class="train-row"><div class="dot frozen"></div><span class="train-label frozen">Gemma 4 Backbone (frozen)</span></div>
+      <div class="train-row"><div class="dot trains"></div><span class="train-label">Action Expert (full)</span></div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">VRAM</div>
+        <div class="metric-value green">~12 GB</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Trainable</div>
+        <div class="metric-value green">~100M</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Data needed</div>
+        <div class="metric-value green">100-1K demos</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Convergence</div>
+        <div class="metric-value green">Fast</div>
+      </div>
+    </div>
+
+    <div class="pros-cons">
+      <h4 class="pro">Pros</h4>
+      <ul class="pro-list">
+        <li>Fits on M3 / consumer GPU</li>
+        <li>Fast iteration (minutes)</li>
+        <li>Small dataset is enough</li>
+        <li>No catastrophic forgetting risk</li>
+        <li>Backbone features are very good</li>
+      </ul>
+      <h4 class="con">Cons</h4>
+      <ul class="con-list">
+        <li>Backbone features are generic, not robot-tuned</li>
+        <li>Can't learn new visual concepts</li>
+        <li>Language grounding is fixed</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Strategy 2: LoRA + Action Expert -->
+  <div class="strategy">
+    <h3>LoRA + Action Expert</h3>
+    <span class="tag medium">Medium Compute</span>
+
+    <div class="what-trains">
+      <div class="label">What trains</div>
+      <div class="train-row"><div class="dot frozen"></div><span class="train-label frozen">Vision Tower (frozen)</span></div>
+      <div class="train-row"><div class="dot lora"></div><span class="train-label">Backbone (LoRA adapters)</span></div>
+      <div class="train-row"><div class="dot trains"></div><span class="train-label">Action Expert (full)</span></div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">VRAM</div>
+        <div class="metric-value yellow">~26 GB</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Trainable</div>
+        <div class="metric-value yellow">~115M</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Data needed</div>
+        <div class="metric-value yellow">1K-10K demos</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Convergence</div>
+        <div class="metric-value yellow">Moderate</div>
+      </div>
+    </div>
+
+    <div class="pros-cons">
+      <h4 class="pro">Pros</h4>
+      <ul class="pro-list">
+        <li>Backbone adapts to robot domain</li>
+        <li>Better scene understanding</li>
+        <li>Instruction grounding improves</li>
+        <li>Retains pre-trained knowledge</li>
+      </ul>
+      <h4 class="con">Cons</h4>
+      <ul class="con-list">
+        <li>Needs 24GB+ GPU (A10, RTX 4090)</li>
+        <li>More data required to avoid overfitting</li>
+        <li>Slower training loop</li>
+        <li>Hyperparameter-sensitive (rank, alpha)</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Strategy 3: Full Fine-tuning -->
+  <div class="strategy">
+    <h3>Full Fine-tuning</h3>
+    <span class="tag hard">High Compute</span>
+
+    <div class="what-trains">
+      <div class="label">What trains</div>
+      <div class="train-row"><div class="dot trains"></div><span class="train-label">Vision Tower (full)</span></div>
+      <div class="train-row"><div class="dot trains"></div><span class="train-label">Backbone (full)</span></div>
+      <div class="train-row"><div class="dot trains"></div><span class="train-label">Action Expert (full)</span></div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">VRAM</div>
+        <div class="metric-value red">&ge;40 GB</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Trainable</div>
+        <div class="metric-value red">~3.5B</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Data needed</div>
+        <div class="metric-value red">50K+ demos</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Convergence</div>
+        <div class="metric-value red">Slow</div>
+      </div>
+    </div>
+
+    <div class="pros-cons">
+      <h4 class="pro">Pros</h4>
+      <ul class="pro-list">
+        <li>Maximum model capacity</li>
+        <li>Vision learns robot-specific features</li>
+        <li>Best possible performance ceiling</li>
+        <li>Can learn entirely new tasks/domains</li>
+      </ul>
+      <h4 class="con">Cons</h4>
+      <ul class="con-list">
+        <li>Requires A100 / H100 GPUs</li>
+        <li>Catastrophic forgetting risk</li>
+        <li>Needs massive dataset to generalize</li>
+        <li>Days of training, expensive</li>
+        <li>Easy to overfit on small data</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<!-- Memory breakdown -->
+<div class="memory-section">
+  <h2>Memory Breakdown (Gemma 4 E2B at bf16)</h2>
+  <table>
+    <tr>
+      <th>Component</th>
+      <th>Action Expert Only</th>
+      <th>LoRA + Expert</th>
+      <th>Full Fine-tune</th>
+    </tr>
+    <tr>
+      <td>Model weights</td>
+      <td class="green">~7 GB (bf16)</td>
+      <td class="yellow">~7.5 GB</td>
+      <td class="red">~7 GB</td>
+    </tr>
+    <tr>
+      <td>Optimizer states</td>
+      <td class="green">~0.8 GB</td>
+      <td class="yellow">~4.9 GB</td>
+      <td class="red">~14 GB</td>
+    </tr>
+    <tr>
+      <td>Gradients</td>
+      <td class="green">~0.4 GB</td>
+      <td class="yellow">~2.5 GB</td>
+      <td class="red">~7 GB</td>
+    </tr>
+    <tr>
+      <td>Activations (bs=1)</td>
+      <td class="green">~3 GB</td>
+      <td class="yellow">~8 GB</td>
+      <td class="red">~12 GB</td>
+    </tr>
+    <tr>
+      <td><strong>Total</strong></td>
+      <td class="green"><strong>~11 GB</strong></td>
+      <td class="yellow"><strong>~23 GB</strong></td>
+      <td class="red"><strong>~40 GB</strong></td>
+    </tr>
+    <tr>
+      <td>Fits on</td>
+      <td class="green">M3 18GB / RTX 3060</td>
+      <td class="yellow">RTX 4090 / A10</td>
+      <td class="red">A100 40GB+</td>
+    </tr>
+  </table>
+</div>
+
+<!-- Decision flow -->
+<div class="decision-section">
+  <h2>Decision Guide: Do You Need to Train the Backbone?</h2>
+  <div style="background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; font-size: 0.88rem;">
+    <div style="margin-bottom: 1.2rem;">
+      <div style="color: var(--blue); font-weight: 600; margin-bottom: 0.5rem;">Q1: Is your robot task visually similar to everyday scenes?</div>
+      <div style="margin-left: 1.5rem; color: var(--muted);">
+        <span style="color: var(--green);">Yes (household, tabletop, objects)</span> &rarr; Backbone's pre-trained features are likely sufficient.<br>
+        <span style="color: var(--red);">No (underwater, microscopy, industrial)</span> &rarr; Backbone needs adaptation. Consider LoRA or full fine-tune.
+      </div>
+    </div>
+    <div style="margin-bottom: 1.2rem;">
+      <div style="color: var(--blue); font-weight: 600; margin-bottom: 0.5rem;">Q2: How much demonstration data do you have?</div>
+      <div style="margin-left: 1.5rem; color: var(--muted);">
+        <span style="color: var(--green);">&lt; 1K demos</span> &rarr; Action expert only. Training backbone risks overfitting.<br>
+        <span style="color: var(--yellow);">1K-10K demos</span> &rarr; LoRA is the sweet spot.<br>
+        <span style="color: var(--red);">&gt; 50K demos</span> &rarr; Full fine-tune becomes viable.
+      </div>
+    </div>
+    <div style="margin-bottom: 1.2rem;">
+      <div style="color: var(--blue); font-weight: 600; margin-bottom: 0.5rem;">Q3: Does the task require language grounding?</div>
+      <div style="margin-left: 1.5rem; color: var(--muted);">
+        <span style="color: var(--green);">Single fixed task ("push the block")</span> &rarr; Language grounding doesn't matter much. Expert-only is fine.<br>
+        <span style="color: var(--yellow);">Multi-task with varied instructions</span> &rarr; LoRA helps the backbone map instructions to actions.<br>
+        <span style="color: var(--red);">Open-vocabulary tasks</span> &rarr; Backbone adaptation is essential.
+      </div>
+    </div>
+    <div>
+      <div style="color: var(--blue); font-weight: 600; margin-bottom: 0.5rem;">Q4: What hardware do you have?</div>
+      <div style="margin-left: 1.5rem; color: var(--muted);">
+        <span style="color: var(--green);">MacBook / consumer GPU (&le;16GB)</span> &rarr; Action expert only.<br>
+        <span style="color: var(--yellow);">RTX 4090 / A10 (24GB)</span> &rarr; LoRA + expert.<br>
+        <span style="color: var(--red);">A100 / H100 (40-80GB)</span> &rarr; Any strategy works.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom line -->
+<div class="bottomline">
+  <h2>The Bottom Line</h2>
+  <p>
+    <strong>Start with action expert only.</strong> Gemma 4's pre-trained vision and language features are
+    remarkably good for everyday robotic tasks. The backbone already understands objects, spatial relationships,
+    and instructions &mdash; the action expert just needs to learn the motor mapping.
+  </p>
+  <p>
+    <strong>Upgrade to LoRA when</strong> you have enough data (1K+ demos) and you see the action expert
+    plateauing &mdash; especially if tasks require nuanced language grounding or unusual visual domains.
+  </p>
+  <p>
+    <strong>Full fine-tuning is rarely necessary</strong> for single-robot setups. It's the pi0 approach
+    for training across dozens of embodiments with millions of trajectories. For research and prototyping,
+    frozen backbone + action expert gets you 80-90% of the way.
+  </p>
+  <p style="margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid rgba(63,185,80,0.2); font-size: 0.82rem;">
+    <strong>Your current M3 config</strong> (<code>metaworld_push_m3.yaml</code>) uses the recommended strategy: frozen backbone, batch=1
+    with grad accumulation=8, action expert only. This fits comfortably in 18GB and is the right starting point for MetaWorld.
+  </p>
+</div>
+
+</body>
+</html>

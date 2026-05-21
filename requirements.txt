@@ -1,0 +1,42 @@
+# Core
+torch>=2.3.0
+torchvision>=0.18.0
+
+# Gemma 4 backbone
+transformers>=4.51.0
+accelerate>=0.30.0
+
+# Parameter-efficient fine-tuning (optional but recommended)
+peft>=0.11.0
+
+# Robot data
+h5py>=3.10.0
+Pillow>=10.0.0
+
+# Utilities
+numpy>=1.26.0
+tqdm>=4.66.0
+PyYAML>=6.0
+
+# Hugging Face Hub (for downloading datasets / models)
+huggingface_hub>=0.23.0
+
+# Optional: 4-bit quantisation (for low-VRAM training)
+# bitsandbytes>=0.43.0
+
+# Simulation (MetaWorld / MuJoCo / Gymnasium)
+gymnasium
+mujoco
+metaworld
+
+# Observability
+rerun-sdk
+mlflow
+
+# Video / image utils
+imageio
+imageio[ffmpeg]
+opencv-python
+
+# Development
+pytest>=8.0.0

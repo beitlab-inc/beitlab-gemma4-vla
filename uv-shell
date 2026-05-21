@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$PROJECT_ROOT"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is not installed. Install it first: https://docs.astral.sh/uv/" >&2
+  exit 1
+fi
+
+if [ "$#" -gt 0 ]; then
+  exec uv run --group dev "$@"
+fi
+
+exec uv run --group dev "${SHELL:-/bin/sh}" -i

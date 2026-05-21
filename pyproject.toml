@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemma4_vla"
+version = "0.1.0"
+description = "Vision-Language-Action model based on Gemma 4 (pi0-style architecture)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "transformers>=4.51.0",
+    "accelerate>=0.30.0",
+    "peft>=0.11.0",
+    "h5py>=3.10.0",
+    "Pillow>=10.0.0",
+    "numpy>=1.26.0",
+    "tqdm>=4.66.0",
+    "PyYAML>=6.0",
+    "huggingface_hub>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev    = ["pytest>=8.0.0"]
+quant  = ["bitsandbytes>=0.43.0"]
+wandb  = ["wandb>=0.17.0"]
+metaworld = [
+    "gymnasium>=1.0.0",
+    "mujoco>=3.0.0",
+    "metaworld @ git+https://github.com/Farama-Foundation/Metaworld.git@master",
+    "imageio>=2.30.0",
+    "opencv-python>=4.8.0",
+]
+observability = [
+    "rerun-sdk>=0.22.0",
+    "mlflow>=2.12.0",
+]
+
+[project.scripts]
+gemma4vla-train = "gemma4_vla.train:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

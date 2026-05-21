@@ -1,0 +1,64 @@
+# Gemma4VLA base configuration
+# Override individual fields in robot-specific configs.
+
+vision:
+  num_cameras: 2
+  image_size: 224
+  freeze_vision: true
+  use_external_encoder: false
+
+backbone:
+  model_name: "google/gemma-4-E2B-it"
+  hidden_size: 2048
+  freeze_backbone: false
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32.0
+  lora_dropout: 0.05
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  max_sequence_length: 1024
+
+action_expert:
+  hidden_size: 1024
+  num_layers: 8
+  num_heads: 16
+  head_dim: 64
+  ffn_multiplier: 4
+  dropout: 0.0
+  use_cross_attention: true
+  noise_embedding_dim: 256
+
+flow_matching:
+  action_horizon: 50
+  num_inference_steps: 10
+  sigma_min: 0.0001
+  time_schedule: "linear"
+
+robot:
+  name: "generic"
+  state_dim: 6
+  action_dim: 6
+  max_state_dim: 18
+  action_scale: 1.0
+
+training:
+  learning_rate: 0.0002
+  backbone_lr_multiplier: 0.1
+  weight_decay: 0.0001
+  warmup_steps: 1000
+  max_steps: 100000
+  batch_size: 32
+  grad_clip_norm: 1.0
+  mixed_precision: "bf16"
+  save_every_n_steps: 5000
+  eval_every_n_steps: 1000
+  log_every_n_steps: 50
+  output_dir: "./checkpoints"
+  dataset_root: "./data"
+  num_workers: 4
+  prefetch_factor: 2
+  use_color_jitter: true
+  use_random_crop: true
+  crop_scale: 0.9
+
+seed: 42
