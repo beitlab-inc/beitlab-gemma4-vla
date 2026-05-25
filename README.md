@@ -65,8 +65,8 @@ Inference:  Euler ODE integration,  t: 0 → 1
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/gemma4_vla
-cd gemma4_vla
+git clone https://github.com/beitlab-inc/beitlab-gemma4-vla
+cd beitlab-gemma4-vla
 
 # Install with uv (creates .venv automatically)
 uv sync
@@ -477,13 +477,37 @@ The CLI now applies the full nested config tree from YAML, not just the
 
 ```text
 checkpoint_dir/
-  config.json   # canonical config artifact
-  config.pt     # compatibility copy containing a plain dict
-  weights.pt    # model state_dict
+  config.json         # canonical config artifact
+  config.pt           # compatibility copy containing a plain dict
+  weights.pt          # model state_dict
+  normalization.pt    # (optional) per-dim state / action stats — see below
 ```
 
 `from_pretrained()` reads `config.json` when present and still supports
-older checkpoints that only contain the legacy `config.pt`.
+older checkpoints that only contain the legacy `config.pt`. If
+`normalization.pt` exists in the same directory it's loaded too, and
+`PolicyRunner.predict()` will denormalise predicted actions automatically.
+
+### Dataset-fit normalisation
+
+Pass `--normalize-stats` to the metaworld train CLI (or set
+`cfg.training.normalize_stats = True`) to:
+
+1. Stream a single pass over the training loader (capped at
+   `cfg.training.normalize_stats_batches`) and compute per-dim mean / std
+   for both `state` and `actions`.
+2. Save them next to the checkpoint as `normalization.pt`.
+3. Normalise inputs inside the dataset's `__getitem__` so the network
+   trains on zero-mean / unit-std vectors.
+4. Denormalise predicted actions in `PolicyRunner.predict()` symmetrically.
+
+```python
+from gemma4_vla import DatasetStats
+
+stats = DatasetStats.load("checkpoints/best")
+if stats is not None and stats.enabled:
+    print("Action mean:", stats.action_mean)
+```
 
 ---
 
@@ -576,6 +600,13 @@ uv run torchrun --nproc_per_node=4 -m gemma4_vla.train \
     --data_root ./data/metaworld_demos \
     --output_dir checkpoints/metaworld_push_ddp
 ```
+
+The training loop auto-detects `RANK` / `WORLD_SIZE` / `LOCAL_RANK` set by
+`torchrun`, initialises NCCL, rebuilds the loaders with `DistributedSampler`,
+wraps the model in `DistributedDataParallel`, and restricts logging /
+MLflow / checkpoint writes to rank 0. The backbone's `device_map="auto"`
+auto-shard is disabled in distributed mode so each rank holds its own model
+copy. See [MULTI_MACHINE_TRAINING.md](MULTI_MACHINE_TRAINING.md) for details.
 
 ---
 
@@ -738,11 +769,20 @@ class MlflowRun:
 
 - [x] Sim evaluation hooks (MuJoCo / MetaWorld / Gymnasium)
 - [x] Real-time visualisation (Rerun) and experiment tracking (MLflow)
+- [x] Dataset-fit per-dim state / action normalisation (`DatasetStats`,
+      `normalization.pt`, applied at train + inference)
+- [x] DDP training via `torchrun` (DistributedSampler, rank-0-gated
+      logging / saves, NCCL teardown)
+- [x] Vision-tower assertion at backbone load (no silent text-only
+      fallback)
 - [ ] FAST tokenisation variant (discrete action tokens via DCT + BPE)
 - [ ] π0.5-style open-world generalisation
 - [ ] IsaacGym / Genesis sim environments
 - [ ] RLDS / Open X-Embodiment dataset adapter
 - [ ] Automatic mixed-precision inference on edge hardware
+- [ ] `LeRobotDataset` adapter + on-robot policy server (see
+      [ROADMAP.md](ROADMAP.md) §2)
+- [ ] TensorRT / FP8 export for Jetson Thor (see [ROADMAP.md](ROADMAP.md) §3)
 
 ---
 

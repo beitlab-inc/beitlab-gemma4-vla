@@ -42,6 +42,7 @@ from .flow_matching import (
     rk4_integration,
 )
 from .observability import RerunLogger, MlflowRun
+from .stats import DatasetStats
 
 __version__ = "0.1.0"
 __author__ = "Gemma4VLA contributors"
@@ -69,4 +70,6 @@ __all__ = [
     # Observability
     "RerunLogger",
     "MlflowRun",
+    # Stats
+    "DatasetStats",
 ]

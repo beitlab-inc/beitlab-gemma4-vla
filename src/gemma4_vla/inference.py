@@ -93,8 +93,10 @@ class PolicyRunner:
         self._num_cameras = self.cfg.vision.num_cameras
         self._max_seq_len = self.cfg.backbone.max_sequence_length
         self._horizon = self.cfg.flow_matching.action_horizon
+        self._state_dim = self.cfg.robot.state_dim
         self._action_dim = self.cfg.robot.action_dim
         self._action_scale = self.cfg.robot.action_scale
+        self._stats = getattr(model, "stats", None)
 
         # Action chunking buffer: we store predicted actions and execute them
         # step by step.  When the buffer is empty we re-run inference.
@@ -125,12 +127,16 @@ class PolicyRunner:
             Action array of shape [horizon, action_dim], float32.
         """
         batch = self._preprocess(obs)
+        if self._stats is not None and self._stats.enabled:
+            batch["state"] = self._stats.normalize_state(batch["state"])
         with torch.no_grad():
             actions = self.model.predict_action(
                 batch,
                 num_steps=num_inference_steps,
                 use_rk4=use_rk4,
             )  # [1, H, action_dim]
+        if self._stats is not None and self._stats.enabled:
+            actions = self._stats.denormalize_actions(actions)
         actions = actions[0].float().cpu().numpy()  # [H, action_dim]
         actions = actions * self._action_scale
         return actions
@@ -178,46 +184,65 @@ class PolicyRunner:
     # ------------------------------------------------------------------
 
     def _preprocess(self, obs: Dict) -> Dict[str, torch.Tensor]:
-        """Convert a raw observation dict to tensors ready for the model."""
+        """Convert a raw observation dict to tensors ready for the model.
+
+        Uses the same chat-template path as the training dataset so the
+        backbone sees identical tokenization at train and inference time.
+        """
         images = obs.get("images", [])
         if not images:
             raise ValueError("obs['images'] must be a non-empty list of images.")
 
-        # Pad / trim to expected number of cameras
-        while len(images) < self._num_cameras:
-            images = images + [images[-1]]  # replicate last camera
-        images = images[: self._num_cameras]
+        pil_images: List[Image.Image] = []
+        for img in images:
+            if isinstance(img, np.ndarray):
+                pil_images.append(Image.fromarray(img.astype(np.uint8)))
+            elif isinstance(img, Image.Image):
+                pil_images.append(img)
+            else:
+                raise TypeError(
+                    f"obs['images'] entries must be np.ndarray or PIL.Image, got {type(img)}"
+                )
 
-        # Process each image
-        img_tensors = [
-            preprocess_image(img, self._image_size) for img in images
-        ]  # list of [3, H, W]
-        pixel_values = torch.stack(img_tensors, dim=0).unsqueeze(0).to(self.device)
-        # [1, num_cameras, 3, H, W]
+        while len(pil_images) < self._num_cameras:
+            pil_images.append(pil_images[-1])
+        pil_images = pil_images[: self._num_cameras]
 
-        # Build text prompt
         instruction = obs.get("instruction", "Perform the task.")
-        prompt = "<image>\n" * self._num_cameras + f"Task: {instruction}"
+        content = [{"type": "image", "image": img} for img in pil_images]
+        content.append({"type": "text", "text": f"Task: {instruction}"})
+        messages = [{"role": "user", "content": content}]
+        prompt = self._processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
+        proc_images = pil_images[0] if len(pil_images) == 1 else pil_images
         encoding = self._processor(
             text=prompt,
+            images=proc_images,
             return_tensors="pt",
             padding="max_length",
             max_length=self._max_seq_len,
             truncation=True,
-        ).to(self.device)
+        )
+        encoding = {k: v.to(self.device) for k, v in encoding.items()}
 
-        # State
-        state = obs.get("state", np.zeros(self._action_dim, dtype=np.float32))
+        state = obs.get("state", np.zeros(self._state_dim, dtype=np.float32))
         if isinstance(state, np.ndarray):
             state = torch.tensor(state, dtype=torch.float32)
-        state = state.unsqueeze(0).to(self.device)  # [1, state_dim]
+        state = state.unsqueeze(0).to(self.device)
 
-        return {
+        result = {
             "input_ids": encoding["input_ids"],
             "attention_mask": encoding["attention_mask"],
-            "pixel_values": pixel_values,
             "state": state,
         }
+        if "pixel_values" in encoding:
+            result["pixel_values"] = encoding["pixel_values"]
+        if "image_position_ids" in encoding:
+            result["image_position_ids"] = encoding["image_position_ids"]
+        if "mm_token_type_ids" in encoding:
+            result["mm_token_type_ids"] = encoding["mm_token_type_ids"]
+        return result
 
     # ------------------------------------------------------------------
     # Factory methods

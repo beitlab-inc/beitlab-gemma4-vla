@@ -46,6 +46,7 @@ from .flow_matching import (
     euler_integration,
     rk4_integration,
 )
+from .stats import DatasetStats
 
 
 CONFIG_JSON_NAME = "config.json"
@@ -157,12 +158,28 @@ class Gemma4Backbone(nn.Module):
             self.processor = AutoProcessor.from_pretrained(
                 bk.model_name, trust_remote_code=True
             )
+            # device_map="auto" shards the backbone across visible GPUs, which
+            # conflicts with DDP (each rank wants its model on one device).
+            # Disable it when we detect a torchrun launch.
+            in_distributed = (
+                "WORLD_SIZE" in os.environ
+                and int(os.environ.get("WORLD_SIZE", "1")) > 1
+            )
+            use_device_map = (
+                torch.cuda.is_available()
+                and not bk.freeze_backbone
+                and not in_distributed
+            )
             self.model = model_cls.from_pretrained(
                 bk.model_name,
                 torch_dtype=torch.bfloat16,
-                device_map="auto" if torch.cuda.is_available() and not bk.freeze_backbone else None,
+                device_map="auto" if use_device_map else None,
                 trust_remote_code=True,
             )
+
+            # Disable cache if gradient checkpointing will be used (incompatible)
+            if cfg.training.gradient_checkpointing:
+                self.model.config.use_cache = False
         except Exception as e:
             raise ImportError(
                 f"Could not load Gemma 4 model '{bk.model_name}'. "
@@ -180,6 +197,26 @@ class Gemma4Backbone(nn.Module):
                 self.hidden_size = self.model.config.hidden_size
             except AttributeError:
                 self.hidden_size = bk.hidden_size
+
+        # Fail loud if the resolved model has no vision tower — otherwise we'd
+        # silently train a text-only fallback while pretending to ingest images.
+        # Gemma4ForConditionalGeneration nests these on the inner Gemma4Model
+        # (self.model.model.vision_tower), so probe both levels.
+        vision_attrs = ("vision_tower", "embed_vision", "vision_model")
+        inner = getattr(self.model, "model", None)
+        has_vision = any(hasattr(self.model, a) for a in vision_attrs) or any(
+            hasattr(inner, a) for a in vision_attrs
+        )
+        if not has_vision and not getattr(cfg.vision, "use_external_encoder", False):
+            raise RuntimeError(
+                f"Loaded backbone '{bk.model_name}' exposes no vision tower "
+                "(no vision_tower / embed_vision / vision_model attribute). "
+                "This usually means the Gemma 4 multimodal weights are not "
+                "yet published under that ID and AutoModelForCausalLM loaded "
+                "a text-only fallback. Use a multimodal model ID, or set "
+                "cfg.vision.use_external_encoder=True if you intend to "
+                "supply a separate vision encoder."
+            )
 
         # --- Freeze / LoRA strategy ---
         #
@@ -360,6 +397,20 @@ class Gemma4VLA(nn.Module):
         self.max_dim = rob.max_state_dim
         self.action_dim = rob.action_dim
         self.state_dim = rob.state_dim
+
+        # Dataset-fit normalisation stats — populated by the trainer (or by
+        # `from_pretrained` if a `normalization.pt` is present).
+        self.stats: Optional[DatasetStats] = None
+
+    def set_stats(self, stats: Optional[DatasetStats]) -> None:
+        """Attach dataset-fit normalisation stats to this model."""
+        self.stats = stats
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Standard `nn.Module` entry point. Delegates to `compute_loss` so
+        the model can be wrapped in `DistributedDataParallel` and called via
+        `ddp_model(batch)` (which is what triggers DDP's gradient sync)."""
+        return self.compute_loss(batch)
 
     # ------------------------------------------------------------------
     # Padding helpers for cross-embodiment
@@ -644,6 +695,10 @@ class Gemma4VLA(nn.Module):
         weights_path = os.path.join(checkpoint_path, WEIGHTS_NAME)
         state_dict = torch.load(weights_path, map_location="cpu")
         model.load_state_dict(state_dict, strict=False)
+
+        stats = DatasetStats.load(checkpoint_path)
+        if stats is not None:
+            model.set_stats(stats)
         return model
 
     def save_pretrained(self, checkpoint_path: str):
@@ -656,4 +711,6 @@ class Gemma4VLA(nn.Module):
         os.makedirs(checkpoint_path, exist_ok=True)
         save_config_artifact(self.cfg, checkpoint_path)
         torch.save(self.state_dict(), os.path.join(checkpoint_path, WEIGHTS_NAME))
+        if self.stats is not None:
+            self.stats.save(checkpoint_path)
         print(f"[Gemma4VLA] Saved to {checkpoint_path}")

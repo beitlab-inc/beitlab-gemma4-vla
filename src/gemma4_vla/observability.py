@@ -89,11 +89,18 @@ class RerunLogger:
             self.rr.log(path, self.rr.Tensor(arr, dim_names=(dim_name,)))
 
     def log_vector_series(self, path, vector):
-        """Log all dimensions as Scalars at one entity path (one time-series plot)."""
+        """Log each dimension as its own scalar time-series under `path/<i>`.
+
+        Rerun's Scalars archetype with a 1D array would batch every value at the
+        same timestamp on a single series — that renders as a single (often
+        invisible) line, not N stacked lines. Fanning out gives a separate plot
+        per channel that the viewer auto-groups.
+        """
         if not self.enabled or vector is None:
             return
         arr = np.asarray(vector, dtype=np.float64).ravel()
-        self.rr.log(path, self.rr.Scalars(arr))
+        for i, v in enumerate(arr):
+            self.rr.log(f"{path}/{i}", self.rr.Scalars(float(v)))
 
     def log_tensor(self, path, tensor, dim_names=None):
         if self.enabled and tensor is not None:
@@ -118,11 +125,15 @@ class MlflowRun:
         tracking_uri=None,
         experiment_name="gemma4-vla",
         run_name=None,
+        system_metrics=False,
+        system_metrics_interval=10.0,
     ):
         self.enabled_requested = enabled
         self.tracking_uri = tracking_uri or os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5001")
         self.experiment_name = experiment_name
         self.run_name = run_name
+        self.system_metrics = system_metrics
+        self.system_metrics_interval = system_metrics_interval
         self.mlflow = None
         self.run = None
 
@@ -145,7 +156,15 @@ class MlflowRun:
         self.mlflow = mlflow
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(self.experiment_name)
-        self.run = mlflow.start_run(run_name=self.run_name)
+
+        if self.system_metrics and hasattr(mlflow, "enable_system_metrics_logging"):
+            try:
+                mlflow.set_system_metrics_sampling_interval(self.system_metrics_interval)
+                mlflow.enable_system_metrics_logging()
+            except Exception as exc:
+                print(f"[mlflow] system metrics disabled: {exc}")
+
+        self.run = mlflow.start_run(run_name=self.run_name, log_system_metrics=self.system_metrics)
         if params:
             mlflow.log_params(sanitize_params(params))
         artifact_uri = mlflow.get_artifact_uri()

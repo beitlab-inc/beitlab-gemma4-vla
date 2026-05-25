@@ -30,18 +30,62 @@ import argparse
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.amp import GradScaler
 
 from .config import Gemma4VLAConfig, metaworld_push_config
 from .model import Gemma4VLA
 from .dataset import RandomDemoDataset, collate_fn
 from .observability import MlflowRun, ensure_parent
+from .stats import DatasetStats
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Distributed helpers
+# ---------------------------------------------------------------------------
+
+def _is_distributed() -> bool:
+    """Detect a torchrun-style launch (RANK + WORLD_SIZE + LOCAL_RANK set, world > 1)."""
+    required = ("RANK", "WORLD_SIZE", "LOCAL_RANK")
+    if not all(v in os.environ for v in required):
+        return False
+    return int(os.environ.get("WORLD_SIZE", "1")) > 1
+
+
+def _init_distributed():
+    """Initialise the NCCL process group and return (rank, world_size, local_rank)."""
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    return rank, world_size, local_rank
+
+
+def _wrap_loader_for_distributed(loader: DataLoader, world_size: int, rank: int, shuffle: bool) -> DataLoader:
+    """Rebuild a DataLoader with a DistributedSampler over the same dataset."""
+    sampler = DistributedSampler(
+        loader.dataset, num_replicas=world_size, rank=rank, shuffle=shuffle, drop_last=True,
+    )
+    return DataLoader(
+        loader.dataset,
+        batch_size=loader.batch_size,
+        sampler=sampler,
+        num_workers=loader.num_workers,
+        collate_fn=loader.collate_fn,
+        pin_memory=loader.pin_memory,
+        drop_last=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,13 +206,28 @@ def train(
         format="%(asctime)s  %(levelname)s  %(message)s",
     )
 
-    torch.manual_seed(cfg.seed)
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
+    # --- Distributed setup (no-op for single-process training) ---
+    distributed = _is_distributed()
+    if distributed:
+        rank, world_size, local_rank = _init_distributed()
+        device = torch.device(f"cuda:{local_rank}")
+        is_rank_0 = rank == 0
+        logger.info(
+            f"DDP launch: rank={rank}/{world_size}  local_rank={local_rank}  device={device}"
+        )
     else:
-        device = torch.device("cpu")
+        rank, world_size, local_rank = 0, 1, 0
+        is_rank_0 = True
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+
+    # Seed per-rank so each shard sees different augmentation noise but the
+    # init still matches across ranks.
+    torch.manual_seed(cfg.seed + rank)
     tr = cfg.training
 
     # --- Model ---
@@ -186,14 +245,20 @@ def train(
     if tr.gradient_checkpointing:
         if hasattr(model.backbone.model, "gradient_checkpointing_enable"):
             model.backbone.model.gradient_checkpointing_enable()
-            logger.info("Gradient checkpointing enabled on backbone")
+            model.backbone.model.config.use_cache = False
+            logger.info("Gradient checkpointing enabled on backbone (use_cache=False)")
 
-    total_params = model.num_parameters()
-    trainable_params = model.num_parameters(trainable_only=True)
-    logger.info(
-        f"Model params: {total_params / 1e6:.1f} M total, "
-        f"{trainable_params / 1e6:.1f} M trainable"
-    )
+    # Keep an unwrapped reference for save / introspection — DDP will wrap
+    # `model` below and we still need to reach `compute_loss`, `backbone`, etc.
+    model_core = model
+
+    total_params = model_core.num_parameters()
+    trainable_params = model_core.num_parameters(trainable_only=True)
+    if is_rank_0:
+        logger.info(
+            f"Model params: {total_params / 1e6:.1f} M total, "
+            f"{trainable_params / 1e6:.1f} M trainable"
+        )
     if tr.grad_accum_steps > 1:
         logger.info(
             f"Gradient accumulation: {tr.grad_accum_steps} micro-steps, "
@@ -225,34 +290,71 @@ def train(
             collate_fn=collate_fn, pin_memory=True
         )
 
+    # --- Normalisation stats (optional) ---
+    # When `normalize_stats` is enabled, compute per-dim state/action stats
+    # once over the training loader, attach them to the model + dataset, and
+    # save them to the output dir so inference can denormalise symmetrically.
+    if tr.normalize_stats and model_core.stats is None:
+        if is_rank_0:
+            logger.info("Computing dataset normalisation stats…")
+        stats = DatasetStats.compute_from_loader(
+            train_loader,
+            max_batches=tr.normalize_stats_batches,
+        )
+        model_core.set_stats(stats)
+        for ds in (train_loader.dataset, val_loader.dataset):
+            if hasattr(ds, "stats"):
+                ds.stats = stats
+        if is_rank_0:
+            os.makedirs(tr.output_dir, exist_ok=True)
+            stats.save(tr.output_dir)
+            logger.info(f"Normalisation stats saved to {tr.output_dir}")
+
+    # --- Distributed sampler + DDP wrap ---
+    # The wrap must happen after `model_core.to(device)` and before optimiser
+    # construction is fine either way (DDP doesn't change parameter identity).
+    if distributed:
+        train_loader = _wrap_loader_for_distributed(train_loader, world_size, rank, shuffle=True)
+        val_loader = _wrap_loader_for_distributed(val_loader, world_size, rank, shuffle=False)
+        model = DistributedDataParallel(
+            model_core,
+            device_ids=[local_rank] if torch.cuda.is_available() else None,
+            output_device=local_rank if torch.cuda.is_available() else None,
+            find_unused_parameters=True,
+        )
+
     # --- Optimiser & Scheduler ---
-    optimizer = build_optimizer(model, cfg)
+    optimizer = build_optimizer(model_core, cfg)
     scheduler = build_scheduler(optimizer, tr.warmup_steps, tr.max_steps)
 
     # --- Mixed precision ---
     use_amp = tr.mixed_precision in ("fp16", "bf16") and device.type in ("cuda", "mps")
     amp_dtype = torch.bfloat16 if tr.mixed_precision == "bf16" else torch.float16
-    scaler = GradScaler(enabled=(tr.mixed_precision == "fp16" and device.type == "cuda"))
+    scaler = GradScaler(device.type, enabled=(tr.mixed_precision == "fp16" and device.type == "cuda"))
 
     # --- Training loop ---
     model.train()
     step = 0
     epoch = 0
     best_val_loss = float("inf")
-    os.makedirs(tr.output_dir, exist_ok=True)
+    if is_rank_0:
+        os.makedirs(tr.output_dir, exist_ok=True)
 
-    logger.info("Starting training…")
+    if is_rank_0:
+        logger.info("Starting training…")
     t0 = time.time()
 
-    append_metric(metrics_path, {
-        "type": "train_start",
-        "dataset_root": tr.dataset_root,
-        "batch_size": tr.batch_size,
-        "max_steps": tr.max_steps,
-        "learning_rate": tr.learning_rate,
-        "mixed_precision": tr.mixed_precision,
-        "config": cfg.to_dict(),
-    })
+    if is_rank_0:
+        append_metric(metrics_path, {
+            "type": "train_start",
+            "dataset_root": tr.dataset_root,
+            "batch_size": tr.batch_size,
+            "max_steps": tr.max_steps,
+            "learning_rate": tr.learning_rate,
+            "mixed_precision": tr.mixed_precision,
+            "world_size": world_size,
+            "config": cfg.to_dict(),
+        })
 
     micro_step = 0
     running_loss = 0.0
@@ -260,6 +362,8 @@ def train(
 
     while step < tr.max_steps:
         epoch += 1
+        if distributed and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         for batch in train_loader:
             if step >= tr.max_steps:
                 break
@@ -267,9 +371,12 @@ def train(
             # Move to device
             batch = {k: v.to(device) for k, v in batch.items()}
 
-            # Forward + loss (scale for gradient accumulation)
+            # Forward + loss (scale for gradient accumulation).
+            # In DDP mode we MUST call `model(batch)` so the wrapper installs
+            # gradient sync hooks; the wrapper delegates to compute_loss via
+            # `Gemma4VLA.forward`.
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-                out = model.compute_loss(batch)
+                out = model(batch)
                 raw_loss = out["loss"]
                 loss = raw_loss / tr.grad_accum_steps
 
@@ -293,62 +400,79 @@ def train(
             last_loss_val = running_loss / tr.grad_accum_steps
             running_loss = 0.0
 
-            # --- Logging ---
-            if step % tr.log_every_n_steps == 0:
+            # --- Logging (rank 0 only) ---
+            if step % tr.log_every_n_steps == 0 and is_rank_0:
                 elapsed = time.time() - t0
-                lr_ae = optimizer.param_groups[-1]["lr"]
+                lr_per_group = {
+                    g.get("name", f"group_{i}"): g["lr"]
+                    for i, g in enumerate(optimizer.param_groups)
+                }
+                ae_lr = lr_per_group.get("action_expert", next(iter(lr_per_group.values())))
+                lr_desc = " ".join(f"lr_{k}={v:.2e}" for k, v in lr_per_group.items())
                 logger.info(
                     f"step {step:6d}/{tr.max_steps}  "
                     f"loss={last_loss_val:.4f}  "
-                    f"lr={lr_ae:.2e}  "
+                    f"{lr_desc}  "
                     f"elapsed={elapsed:.0f}s"
                 )
                 append_metric(metrics_path, {
                     "type": "step",
                     "step": step,
                     "loss": last_loss_val,
-                    "lr": lr_ae,
+                    "lr_action_expert": ae_lr,
+                    "lr_per_group": lr_per_group,
                     "elapsed_s": elapsed,
                 })
                 mlflow_run.log_metrics(
-                    {"train/loss": last_loss_val, "train/lr": lr_ae},
+                    {
+                        "train/loss": last_loss_val,
+                        **{f"train/lr_{k}": v for k, v in lr_per_group.items()},
+                    },
                     step=step,
                 )
 
-            # --- Validation ---
+            # --- Validation (rank 0 only — DDP barrier keeps ranks aligned) ---
             if step % tr.eval_every_n_steps == 0:
-                val_loss = evaluate(model, val_loader, device, use_amp, amp_dtype)
-                logger.info(f"  val_loss={val_loss:.4f}")
+                if is_rank_0:
+                    val_loss = evaluate(model_core, val_loader, device, use_amp, amp_dtype)
+                    logger.info(f"  val_loss={val_loss:.4f}")
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        model_core.save_pretrained(os.path.join(tr.output_dir, "best"))
                 model.train()
-
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    model.save_pretrained(os.path.join(tr.output_dir, "best"))
+                if distributed:
+                    dist.barrier()
 
             # --- Checkpoint ---
-            if step % tr.save_every_n_steps == 0:
+            if step % tr.save_every_n_steps == 0 and is_rank_0:
                 ckpt_dir = os.path.join(tr.output_dir, f"step_{step:07d}")
-                model.save_pretrained(ckpt_dir)
+                model_core.save_pretrained(ckpt_dir)
                 logger.info(f"  Saved checkpoint → {ckpt_dir}")
 
     # Final save
     final_dir = os.path.join(tr.output_dir, "final")
-    model.save_pretrained(final_dir)
+    if is_rank_0:
+        model_core.save_pretrained(final_dir)
     total_time = time.time() - t0
-    logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
+    if is_rank_0:
+        logger.info(f"Training complete. Best val loss: {best_val_loss:.4f}")
+        append_metric(metrics_path, {
+            "type": "train_end",
+            "checkpoint_path": final_dir,
+            "total_time_s": total_time,
+            "best_val_loss": best_val_loss,
+        })
+        mlflow_run.log_metrics({
+            "train/final_loss": last_loss_val,
+            "train/best_val_loss": best_val_loss if best_val_loss < float("inf") else 0.0,
+            "train/total_time_s": total_time,
+        })
 
-    append_metric(metrics_path, {
-        "type": "train_end",
-        "checkpoint_path": final_dir,
-        "total_time_s": total_time,
-        "best_val_loss": best_val_loss,
-    })
-    mlflow_run.log_metrics({
-        "train/final_loss": last_loss_val,
-        "train/best_val_loss": best_val_loss if best_val_loss < float("inf") else 0.0,
-        "train/total_time_s": total_time,
-    })
-    return model
+    if distributed and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+    return model_core
 
 
 # ---------------------------------------------------------------------------

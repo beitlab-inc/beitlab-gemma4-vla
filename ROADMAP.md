@@ -34,17 +34,24 @@ pass over `src/`):
 - Checkpoint save/load is JSON-first and `torch.load(weights_only=True)`-safe
   ([model.py:65](src/gemma4_vla/model.py)).
 
+Recently landed (see also the bottom of §4):
+
+- Vision-tower assertion in `Gemma4Backbone.__init__` fails loud when the
+  loaded backbone has no vision tower — no more silent text-only fallback.
+- Dataset-fit action / state normalisation
+  ([stats.py](src/gemma4_vla/stats.py), `--normalize-stats` CLI,
+  `normalization.pt` next to the checkpoint, applied symmetrically at train
+  and inference time).
+- DDP via `torchrun` ([train.py](src/gemma4_vla/train.py)) — DistributedSampler,
+  DDP-wrapped forward, rank-0-only logs/saves, NCCL teardown.
+
 Partial / risky today:
 
-- Gemma 4 is referenced by name (`google/gemma-4-*-it`) with a silent
-  fallback to `AutoModelForCausalLM`. If the real weights aren't yet
-  published under that ID, training will quietly load a text-only model.
 - `bitsandbytes` is in `[quant]` extras but not actually wired into the
   forward pass.
 - `LeRobotDataset` is HDF5-only — it does **not** call the official
   `lerobot.common.datasets.lerobot_dataset.LeRobotDataset`.
-- No DDP, no ONNX/TensorRT export, no on-robot server, no dataset-fit
-  action normalisation.
+- No ONNX/TensorRT export, no on-robot server.
 
 ---
 
@@ -62,25 +69,32 @@ gemma4vla-train --config configs/so100_config.yaml --recipe two_stage
 Implementation: add a `training.recipe` enum (`single`, `two_stage`,
 `progressive_unfreeze`) in `TrainingConfig` and branch in `train.main`.
 
-### 1.2 Dataset-fit action / state normalisation
+### 1.2 Dataset-fit action / state normalisation — **DONE**
 
-Right now actions are scaled by a single scalar (`RobotConfig.action_scale`).
-That breaks the moment you switch robots or datasets.
+Implemented in [stats.py](src/gemma4_vla/stats.py):
 
-Proposed:
+- `DatasetStats.compute_from_loader` streams per-dim mean/std over the train
+  loader (capped at `cfg.training.normalize_stats_batches`).
+- Stats are saved as `normalization.pt` next to the checkpoint with the keys
+  `state_mean`, `state_std`, `action_mean`, `action_std`, `normalize` —
+  compatible with the loader the eval script already uses.
+- The metaworld HDF5 dataset normalises in `__getitem__` when stats are
+  attached; `PolicyRunner.predict` denormalises symmetrically.
+- Opt in via `cfg.training.normalize_stats = True` or the
+  `--normalize-stats` CLI flag.
 
-- Add `gemma4_vla.stats.DatasetStats` that computes per-DOF
-  `min / max / mean / std` on a first pass over the dataset.
-- Persist it next to the checkpoint as `normalizer.json`.
-- Apply in the dataset `__getitem__` and reverse inside
-  `PolicyRunner.predict`.
+Open: `RobotConfig.action_scale` still applies on top; consider deprecating
+it once the new path has burn-in on a real robot.
 
-This aligns with what LeRobot's `Normalize` / `Unnormalize` transforms do,
-so we can share stats between formats.
+### 1.3 DDP + gradient accumulation — **DONE**
 
-### 1.3 DDP + gradient accumulation
-
-`train.py` is single-process today. For Gemma 4 E4B + LoRA on 4× A100/H100:
+`gemma4_vla.train.train()` now detects `RANK` / `WORLD_SIZE` / `LOCAL_RANK`
+(set by torchrun), initialises NCCL, wraps the train/val loaders with
+`DistributedSampler`, wraps the model in `DistributedDataParallel`, and
+gates logging/MLflow/JSONL metrics/checkpoint saves to rank 0. `Gemma4VLA`
+gained a `forward(batch)` entry point so DDP's grad-sync hooks fire.
+`Gemma4Backbone` disables `device_map="auto"` under torchrun. Gradient
+accumulation was already in place and continues to work.
 
 ```bash
 torchrun --nproc_per_node=4 -m gemma4_vla.train \
@@ -88,14 +102,9 @@ torchrun --nproc_per_node=4 -m gemma4_vla.train \
     --output_dir checkpoints/so100_ddp
 ```
 
-Minimal changes required in [train.py](src/gemma4_vla/train.py):
-
-- `torch.distributed.init_process_group("nccl")` when `LOCAL_RANK` is set.
-- Wrap `model` in `DistributedDataParallel(find_unused_parameters=False)`.
-- `DistributedSampler` on the train dataloader, broadcast the epoch seed.
-- `gradient_accumulation_steps` in `TrainingConfig`; step the optimiser
-  every N micro-batches, divide loss accordingly.
-- Only rank 0 writes checkpoints and logs to W&B.
+Still open: end-to-end soak test on real multi-GPU hardware, and teaching
+`machine_config.py` about `WORLD_SIZE` so it doesn't recommend a per-rank
+batch size meant for single-process training.
 
 ### 1.4 Validation, early stopping, eval metrics
 
@@ -247,8 +256,8 @@ Do **not** use the generic `pip install torch` — we need the JetPack
 ARM64/CUDA 13 wheels NVIDIA publishes on `pypi.jetson-ai-lab.dev`:
 
 ```bash
-git clone https://github.com/your-org/gemma4_vla
-cd gemma4_vla
+git clone https://github.com/beitlab-inc/beitlab-gemma4-vla
+cd beitlab-gemma4-vla
 python3.12 -m venv .venv
 source .venv/bin/activate
 
@@ -364,11 +373,11 @@ Foxglove dashboard without inventing yet another transport.
 
 Priority-ordered, rough sizing. Each item below is one focused PR.
 
-1. **[M]** Dataset-fit normaliser (§1.2) — unblocks everything downstream.
+1. ~~**[M]** Dataset-fit normaliser (§1.2) — unblocks everything downstream.~~ **DONE**
 2. **[M]** `LeRobotDatasetAdapter` on top of `lerobot.LeRobotDataset`
    (§2.1).
 3. **[S]** `training.recipe` flag and curriculum wiring (§1.1).
-4. **[M]** DDP + grad accumulation (§1.3).
+4. ~~**[M]** DDP + grad accumulation (§1.3).~~ **DONE** (needs real multi-GPU soak test)
 5. **[M]** `gemma4_vla.server` + LeRobot `Policy` client (§2.3).
 6. **[S]** Eval harness on LeRobot sim benchmarks (§2.4).
 7. **[L]** TensorRT export + `Gemma4VLATRT` wrapper (§3.4).
@@ -386,10 +395,14 @@ Sizes: S ≈ ½–1 day, M ≈ 2–4 days, L ≈ 1 week.
 
 - **Gemma 4 availability.** The code assumes `google/gemma-4-E2B-it` etc.
   exist on HF Hub. If Google publishes under a different ID or gated
-  release, the silent fallback in [model.py:150](src/gemma4_vla/model.py)
-  will load a text-only model and training will appear to work while
-  learning nothing from images. Before the first real run: add an
-  assertion that the loaded model has a vision tower, fail loudly if not.
+  release, the fallback to `AutoModelForCausalLM` in
+  [model.py](src/gemma4_vla/model.py) would otherwise load a text-only
+  model. As of the latest change `Gemma4Backbone.__init__` now raises a
+  `RuntimeError` when the loaded model exposes no `vision_tower` /
+  `embed_vision` / `vision_model` attribute, so this fails loud rather than
+  training silently on text only. Override by setting
+  `cfg.vision.use_external_encoder = True` if you intend to supply your own
+  vision encoder.
 - **LoRA + FP8 interaction.** `merge_and_unload` into FP8 weights needs
   validation; we may have to merge into BF16, then quantise post-merge.
 - **LeRobot API stability.** `lerobot` is pre-1.0; pin to a specific

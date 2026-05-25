@@ -137,13 +137,16 @@ class RandomDemoDataset(Dataset):
                 result["mm_token_type_ids"] = enc["mm_token_type_ids"].squeeze(0)
             return result
         else:
-            # No processor — text-only fallback (no pixel_values)
+            # No processor — synthesise pixel_values so downstream collation
+            # and shape-sensitive tests can run without HF weights loaded.
             input_ids = torch.zeros(self.max_seq_len, dtype=torch.long)
             attention_mask = torch.ones(self.max_seq_len, dtype=torch.long)
+            pixel_values = torch.randn(self.num_cameras, 3, self.image_size, self.image_size)
 
             return {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
+                "pixel_values": pixel_values,
                 "state": state,
                 "actions": actions,
             }

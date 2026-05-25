@@ -15,6 +15,7 @@
 
 vision:
   num_cameras: 1
+  camera_names: ["topview"]
   image_size: 224
   freeze_vision: false         # vision tower trains too
 

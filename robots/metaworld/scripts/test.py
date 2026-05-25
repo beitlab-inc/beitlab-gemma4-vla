@@ -12,6 +12,7 @@ from gemma4_vla.inference import PolicyRunner
 from gemma4_vla.model import Gemma4VLA, load_config_artifact
 from gemma4_vla.config import Gemma4VLAConfig
 from gemma4_vla.observability import MlflowRun, RerunLogger, ensure_parent
+from gemma4_vla.stats import DatasetStats
 
 
 def parse_args():
@@ -56,16 +57,20 @@ def parse_args():
 
 
 def load_normalization_stats(checkpoint_path, device):
-    """Load normalization stats from checkpoint if present."""
-    weights_path = os.path.join(checkpoint_path, "normalization.pt")
-    if os.path.exists(weights_path):
-        stats = torch.load(weights_path, map_location=device)
+    """Load normalization stats from checkpoint if present.
+
+    PolicyRunner already applies these on every predict() call when present,
+    so this helper exists only to surface the loaded stats in MLflow params
+    and the per-step metrics file for downstream analysis.
+    """
+    stats = DatasetStats.load(checkpoint_path)
+    if stats is not None and stats.enabled:
         return {
-            "state_mean": stats["state_mean"].to(device),
-            "state_std": stats["state_std"].to(device),
-            "action_mean": stats["action_mean"].to(device),
-            "action_std": stats["action_std"].to(device),
-            "normalize": bool(stats.get("normalize", True)),
+            "state_mean": stats.state_mean.to(device),
+            "state_std": stats.state_std.to(device),
+            "action_mean": stats.action_mean.to(device),
+            "action_std": stats.action_std.to(device),
+            "normalize": True,
         }
     return {
         "state_mean": torch.zeros(1),
@@ -179,16 +184,12 @@ def main():
             with torch.no_grad():
                 actions = runner.predict(obs)
 
+            # `runner.predict` already denormalises with the checkpoint's stats
+            # (if present), so the value here is in env space — only clipping
+            # remains. Keep the three-step debug fields so analysis tooling
+            # downstream still sees model/unclipped/clipped views.
             action_model_np = actions[0]
-
-            if norm["normalize"]:
-                action_mean = norm["action_mean"].cpu().numpy()
-                action_std = norm["action_std"].cpu().numpy()
-                action_dim = env.action_dim
-                action_env_np = action_model_np[:action_dim] * action_std[:action_dim] + action_mean[:action_dim]
-            else:
-                action_env_np = action_model_np[:env.action_dim].copy()
-
+            action_env_np = action_model_np[:env.action_dim].copy()
             action_np = np.clip(action_env_np, env.action_low, env.action_high)
 
             img, state, reward, done, info = env.step(action_np)

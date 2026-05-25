@@ -23,9 +23,15 @@ still need careful end-to-end validation against real Gemma 4 checkpoints.
 
 ### Core model
 - `src/gemma4_vla/config.py`
-  Dataclass configuration and preset builders.
+  Dataclass configuration and preset builders. `TrainingConfig` carries
+  the `normalize_stats` flag.
 - `src/gemma4_vla/model.py`
   Main model, backbone wrapper, checkpoint save/load helpers.
+  `Gemma4Backbone.__init__` raises if the loaded model exposes no vision
+  tower (no silent text-only fallback). `device_map="auto"` is disabled
+  under `torchrun`. `Gemma4VLA.forward(batch)` delegates to `compute_loss`
+  so DDP's grad-sync hooks fire. `save_pretrained` / `from_pretrained`
+  round-trip `normalization.pt` when present.
 - `src/gemma4_vla/action_expert.py`
   Standalone action expert transformer.
 - `src/gemma4_vla/flow_matching.py`
@@ -33,9 +39,21 @@ still need careful end-to-end validation against real Gemma 4 checkpoints.
 - `src/gemma4_vla/dataset.py`
   Image transforms, RandomDemoDataset for smoke-testing, collate_fn.
 - `src/gemma4_vla/inference.py`
-  `PolicyRunner` inference wrapper and preprocessing path.
+  `PolicyRunner` inference wrapper and preprocessing path. Uses the same
+  `apply_chat_template` path as the training dataset and auto-denormalises
+  predicted actions when the checkpoint carries `normalization.pt`.
 - `src/gemma4_vla/train.py`
-  Training loop, CLI entry point, JSONL metrics, and MLflow integration.
+  Training loop, CLI entry point, JSONL metrics, MLflow integration, and
+  the DDP scaffold (`_is_distributed`, `_init_distributed`,
+  `_wrap_loader_for_distributed`). Rank-0-only logging/saves.
+- `src/gemma4_vla/stats.py`
+  `DatasetStats` — per-dim state/action mean/std. `compute_from_loader`
+  streams a single pass; `save`/`load` round-trip `normalization.pt`;
+  `normalize_state` / `normalize_actions` / `denormalize_actions` apply.
+- `src/gemma4_vla/machine_config.py`
+  Auto-detect Jetson Thor / cloud GPU class. `apply_machine_defaults`
+  reads `TrainingConfig` defaults at runtime instead of hard-coding
+  sentinel values.
 
 ### Robot adapters (robots/)
 - `robots/metaworld/env.py`

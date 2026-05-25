@@ -32,6 +32,7 @@ metaworld
 # Observability
 rerun-sdk
 mlflow
+pynvml  # MLflow GPU system-metrics sampler
 
 # Video / image utils
 imageio

@@ -42,6 +42,18 @@ class VisionConfig:
     num_cameras: int = 2
     """Number of RGB camera inputs per observation."""
 
+    camera_names: Optional[List[str]] = None
+    """
+    Names of the cameras to load from each episode, in the order they should
+    be fed to the vision encoder. Dataset adapters that store frames keyed by
+    camera name (e.g. the MetaWorld HDF5 layout) use this to pick exactly
+    which cameras train. When None, adapters fall back to picking the first
+    `num_cameras` keys in whatever order the storage backend reports them
+    (alphabetical for HDF5) — this is unsafe when an episode contains more
+    cameras than the model uses, so set this list explicitly in production.
+    When set, `len(camera_names)` must equal `num_cameras`.
+    """
+
     image_size: int = 224
     """Spatial resolution fed to the vision encoder (height == width)."""
 
@@ -98,7 +110,14 @@ class BackboneConfig:
     """Dropout rate inside LoRA adapters."""
 
     max_sequence_length: int = 1024
-    """Maximum number of tokens (images + text) passed to the backbone."""
+    """Maximum number of tokens (images + text) passed to the backbone.
+
+    The HF processor pads every sample to this length, so a high value costs
+    compute even when instructions are short. Pick the smallest value that
+    holds your longest prompt + the image tokens for your `vision.num_cameras`.
+    The figure in the README about 256K context is the Gemma 4 *capability*;
+    in practice we run with the much smaller value here.
+    """
 
 
 @dataclass
@@ -193,6 +212,14 @@ class RobotConfig:
     """
     Padding target for cross-embodiment training.
     All state / action vectors are zero-padded to this size.
+
+    NOTE: this must be >= the max of `state_dim` and `action_dim` across every
+    embodiment you intend to mix.  Setting it equal to `state_dim` (as
+    `metaworld_push_config()` does) is the right floor for single-robot
+    training but leaves no headroom — bump it when wiring up cross-embodiment
+    training (roadmap §1.6). Changing it invalidates existing checkpoints,
+    because the action expert's state_proj / action_proj / velocity_head are
+    sized to this value.
     """
 
     action_scale: float = 1.0
@@ -237,6 +264,15 @@ class TrainingConfig:
     use_random_crop: bool = True
     crop_scale: float = 0.9
 
+    # Normalisation
+    normalize_stats: bool = False
+    """Compute per-dim state / action stats once before training, normalise
+    inputs during training, and save them next to the checkpoint so
+    ``PolicyRunner`` can denormalise at inference time."""
+    normalize_stats_batches: int = 200
+    """Maximum number of batches scanned when computing stats. Set None to
+    walk the whole loader once."""
+
 
 @dataclass
 class Gemma4VLAConfig:
@@ -259,6 +295,13 @@ class Gemma4VLAConfig:
             f"action_expert hidden_size ({ae.hidden_size}) must be divisible "
             f"by num_heads ({ae.num_heads})"
         )
+        v = self.vision
+        if v.camera_names is not None and len(v.camera_names) != v.num_cameras:
+            raise ValueError(
+                f"vision.camera_names has {len(v.camera_names)} entries "
+                f"({v.camera_names}) but vision.num_cameras is {v.num_cameras}; "
+                f"they must match."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the config tree to a JSON-serialisable dict."""
