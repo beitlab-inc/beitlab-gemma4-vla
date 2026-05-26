@@ -231,9 +231,11 @@ class Gemma4Backbone(nn.Module):
         #   freeze_backbone=False, use_lora=False → everything trains
         #   (freeze_vision still respected)
 
+        self._fully_frozen = bool(bk.freeze_backbone)
         if bk.freeze_backbone:
             for p in self.model.parameters():
                 p.requires_grad_(False)
+            self.model.eval()
 
         # Optionally apply LoRA (only when backbone is not fully frozen)
         if bk.use_lora and not bk.freeze_backbone:
@@ -325,15 +327,17 @@ class Gemma4Backbone(nn.Module):
         Returns:
             Hidden states [B, S, hidden_size] where S = image_tokens + T.
         """
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            image_position_ids=image_position_ids,
-            mm_token_type_ids=mm_token_type_ids,
-            output_hidden_states=True,
-            return_dict=True,
-        )
+        ctx = torch.no_grad() if self._fully_frozen else torch.enable_grad()
+        with ctx:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_position_ids=image_position_ids,
+                mm_token_type_ids=mm_token_type_ids,
+                output_hidden_states=True,
+                return_dict=True,
+            )
         # Return last-layer hidden states
         return outputs.hidden_states[-1]  # [B, S, hidden_size]
 
@@ -463,12 +467,16 @@ class Gemma4VLA(nn.Module):
         """
         # Project backbone features to action expert dim
         # Backbone may output bf16 while obs_proj is fp32
-        obs = self.obs_proj(obs_features.to(self.obs_proj.weight.dtype))  # [B, S, ae_hidden]
+        ae_dtype = self.obs_proj.weight.dtype
+        obs = self.obs_proj(obs_features.to(ae_dtype))  # [B, S, ae_hidden]
 
+        # The action expert is fp32; the integrator at inference seeds noise in
+        # the backbone's dtype (bf16), so we must coerce here. Training inputs
+        # are already fp32, so this is a no-op there.
         velocity = self.action_expert(
-            state=state,
-            noisy_actions=noisy_actions,
-            noise_level=noise_level,
+            state=state.to(ae_dtype),
+            noisy_actions=noisy_actions.to(ae_dtype),
+            noise_level=noise_level.to(ae_dtype) if noise_level.is_floating_point() else noise_level,
             obs_features=obs,
             obs_mask=obs_mask,
         )

@@ -264,6 +264,13 @@ class TrainingConfig:
     use_random_crop: bool = True
     crop_scale: float = 0.9
 
+    # Early stopping (val-loss based, runs at `eval_every_n_steps` cadence)
+    early_stopping_patience: int = 0
+    """Stop training when val_loss hasn't improved for this many consecutive
+    eval rounds. 0 disables (default — match prior behaviour)."""
+    early_stopping_min_delta: float = 0.0
+    """Minimum decrease in val_loss to count as an improvement."""
+
     # Normalisation
     normalize_stats: bool = False
     """Compute per-dim state / action stats once before training, normalise

@@ -230,6 +230,13 @@ def train(
     torch.manual_seed(cfg.seed + rank)
     tr = cfg.training
 
+    # CUDA perf knobs: cuDNN picks the best kernel per shape (we see the same
+    # shapes every step), TF32 lets matmul use the faster TF32 path on Ampere+.
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     # --- Model ---
     if model is None:
         logger.info("Initialising Gemma4VLA...")
@@ -360,12 +367,16 @@ def train(
     running_loss = 0.0
     last_loss_val = 0.0
 
-    while step < tr.max_steps:
+    # Early stopping bookkeeping (only used when patience > 0).
+    patience_counter = 0
+    early_stop = False
+
+    while step < tr.max_steps and not early_stop:
         epoch += 1
         if distributed and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         for batch in train_loader:
-            if step >= tr.max_steps:
+            if step >= tr.max_steps or early_stop:
                 break
 
             # Move to device
@@ -436,11 +447,39 @@ def train(
                 if is_rank_0:
                     val_loss = evaluate(model_core, val_loader, device, use_amp, amp_dtype)
                     logger.info(f"  val_loss={val_loss:.4f}")
-                    if val_loss < best_val_loss:
+                    mlflow_run.log_metric("val/loss", val_loss, step=step)
+                    improved = val_loss < (best_val_loss - tr.early_stopping_min_delta)
+                    if improved:
                         best_val_loss = val_loss
+                        patience_counter = 0
                         model_core.save_pretrained(os.path.join(tr.output_dir, "best"))
+                    else:
+                        patience_counter += 1
+                    if (
+                        tr.early_stopping_patience > 0
+                        and patience_counter >= tr.early_stopping_patience
+                    ):
+                        logger.info(
+                            f"Early stopping at step {step}: val_loss did not "
+                            f"improve for {patience_counter} eval rounds "
+                            f"(best={best_val_loss:.4f})"
+                        )
+                        early_stop = True
+                        mlflow_run.log_metric("train/early_stopped_at_step", step, step=step)
+                        append_metric(metrics_path, {
+                            "type": "early_stop",
+                            "step": step,
+                            "best_val_loss": best_val_loss,
+                            "patience": tr.early_stopping_patience,
+                        })
                 model.train()
                 if distributed:
+                    # Broadcast the rank-0 decision to all ranks so they exit together.
+                    stop_flag = torch.tensor(
+                        [1.0 if early_stop else 0.0], device=device
+                    )
+                    dist.broadcast(stop_flag, src=0)
+                    early_stop = bool(stop_flag.item() > 0.5)
                     dist.barrier()
 
             # --- Checkpoint ---

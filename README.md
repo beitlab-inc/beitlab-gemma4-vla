@@ -1,5 +1,7 @@
 # Gemma4VLA — Vision-Language-Action Model
 
+**A BeitLab Robotics Research Initiative** 🤖
+
 A PyTorch implementation of a **pi0-style VLA** (Vision-Language-Action model)
 that replaces the PaliGemma backbone with **Google Gemma 4**.
 
@@ -8,6 +10,30 @@ that replaces the PaliGemma backbone with **Google Gemma 4**.
 > reads camera images + a language instruction and predicts motor commands.
 > It bridges the gap between large vision-language models (trained on internet
 > data) and physical robot control.
+
+---
+
+## About BeitLab 🏭
+
+**BeitLab Robotics** is committed to democratizing robot learning through open-source research and accessible tools. 
+
+This project demonstrates that **cutting-edge VLA training is now possible on edge hardware** — specifically the **Jetson Thor**, a powerful yet cost-effective GPU for robotics applications. We've engineered this pipeline to be:
+
+- 🚀 **Hardware-agnostic**: Automatic detection and optimization for Jetson Thor, cloud GPUs (A100/H100/L40S), and desktop setups
+- 🔓 **Fully open-source**: All code, configs, and documentation freely available
+- 📊 **Production-ready**: Integrated observability (Rerun + MLflow), distributed training (DDP), and multi-machine support
+- 🤝 **Community-driven**: Built for researchers, engineers, and hobbyists
+
+### Key Achievement
+
+Train **Gemma 4 Vision-Language-Action models on Jetson Thor's shared 12GB VRAM** with:
+- Automatic batch-size scaling (2–16 per hardware tier)
+- Gradient checkpointing + LoRA for memory efficiency
+- Real-time telemetry via Rerun
+- GPU metrics tracking via MLflow
+- Multi-camera data collection with semantic state logging
+
+This is the foundation for on-device robot learning without cloud dependency.
 
 ---
 
@@ -788,9 +814,16 @@ class MlflowRun:
 
 ## Citation
 
-If you use this codebase, please cite the original pi0 paper and Gemma 4:
+If you use this codebase, please cite the original pi0 paper, Gemma 4, and this work:
 
 ```bibtex
+@software{beitlab_gemma4_vla_2025,
+  title   = {Gemma4VLA: Open-Source Vision-Language-Action Models on Edge Hardware},
+  author  = {BeitLab Robotics},
+  url     = {https://github.com/beitlab-inc/beitlab-gemma4-vla},
+  year    = {2025},
+}
+
 @article{black2024pi0,
   title   = {π0: A Vision-Language-Action Flow Model for General Robot Control},
   author  = {Black, Kevin and Brown, Noah and others},

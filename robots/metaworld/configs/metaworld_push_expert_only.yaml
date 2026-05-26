@@ -23,6 +23,7 @@ backbone:
   model_name: "google/gemma-4-E2B-it"
   freeze_backbone: true       # backbone = frozen feature extractor
   use_lora: false              # no LoRA needed when frozen
+  max_sequence_length: 384    # was 1024; ~7x lower attention cost
 
 action_expert:
   hidden_size: 1024
@@ -40,10 +41,18 @@ robot:
   max_state_dim: 39
 
 training:
-  learning_rate: 0.0005        # higher LR since only expert trains
-  batch_size: 16
+  learning_rate: 0.0002        # was 5e-4; lowered to fix cached-training divergence
+  batch_size: 2                # Thor-safe; raise to 16 on 16GB+ discrete GPUs
+  grad_accum_steps: 4          # effective batch = 8
   max_steps: 20000
-  warmup_steps: 500
+  warmup_steps: 1000           # longer warmup damps the early-step instability
+  grad_clip_norm: 0.5          # tighter clipping to catch gradient spikes
   mixed_precision: "bf16"
+  gradient_checkpointing: false  # backbone is frozen — checkpointing buys nothing
+  num_workers: 3                 # Thor unified memory: each worker forks ~3GB
+  prefetch_factor: 2             # tighter prefetch to bound queue memory
+  early_stopping_patience: 3     # stop after 3 evals with no val_loss improvement
+  early_stopping_min_delta: 0.001  # require >=0.001 absolute drop to count
+  eval_every_n_steps: 50        # eval more often so early stop reacts in time
   output_dir: "./checkpoints/metaworld_push_expert"
   dataset_root: "./data/metaworld_demos"

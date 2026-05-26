@@ -179,7 +179,14 @@ def apply_machine_defaults(
         tr.grad_accum_steps = machine.recommended_grad_accum_steps
 
     if force or tr.gradient_checkpointing == defaults.gradient_checkpointing:
-        tr.gradient_checkpointing = machine.use_gradient_checkpointing
+        # Gradient checkpointing only saves memory when the backbone actually
+        # runs a backward pass — pointless overhead when it's frozen.
+        backbone_trains = (
+            not cfg.backbone.freeze_backbone
+        )
+        tr.gradient_checkpointing = (
+            machine.use_gradient_checkpointing and backbone_trains
+        )
 
     if force or tr.mixed_precision == defaults.mixed_precision:
         tr.mixed_precision = machine.recommended_precision

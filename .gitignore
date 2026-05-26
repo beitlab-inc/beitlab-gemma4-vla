@@ -43,3 +43,5 @@ MUJOCO_LOG.txt
 .idea/
 .claude/
 *.log
+
+outputs

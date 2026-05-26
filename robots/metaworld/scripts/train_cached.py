@@ -113,6 +113,10 @@ def train_cached(
     running_loss = 0.0
     last_loss_val = 0.0
 
+    # Early stopping bookkeeping (only used when patience > 0).
+    patience_counter = 0
+    early_stop = False
+
     os.makedirs(tr.output_dir, exist_ok=True)
     logger.info(
         f"Starting cached training: {tr.max_steps} steps, "
@@ -131,10 +135,10 @@ def train_cached(
         "learning_rate": tr.learning_rate,
     })
 
-    while step < tr.max_steps:
+    while step < tr.max_steps and not early_stop:
         epoch += 1
         for batch in train_loader:
-            if step >= tr.max_steps:
+            if step >= tr.max_steps or early_stop:
                 break
 
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -192,9 +196,30 @@ def train_cached(
                 model.train()
                 mlflow_run.log_metrics({"val/loss": val_loss}, step=step)
 
-                if val_loss < best_val_loss:
+                improved = val_loss < (best_val_loss - tr.early_stopping_min_delta)
+                if improved:
                     best_val_loss = val_loss
+                    patience_counter = 0
                     model.save_pretrained(os.path.join(tr.output_dir, "best"))
+                else:
+                    patience_counter += 1
+                if (
+                    tr.early_stopping_patience > 0
+                    and patience_counter >= tr.early_stopping_patience
+                ):
+                    logger.info(
+                        f"Early stopping at step {step}: val_loss did not "
+                        f"improve for {patience_counter} eval rounds "
+                        f"(best={best_val_loss:.4f})"
+                    )
+                    early_stop = True
+                    mlflow_run.log_metric("train/early_stopped_at_step", step, step=step)
+                    append_metric(metrics_path, {
+                        "type": "early_stop",
+                        "step": step,
+                        "best_val_loss": best_val_loss,
+                        "patience": tr.early_stopping_patience,
+                    })
 
             # --- Checkpoint ---
             if step % tr.save_every_n_steps == 0:
