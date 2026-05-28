@@ -32,6 +32,7 @@ metaworld = [
     "mujoco>=3.0.0",
     "metaworld @ git+https://github.com/Farama-Foundation/Metaworld.git@8fe7e8e953dcd8742c5750b12ace35bdec52d317",
     "imageio>=2.30.0",
+    "imageio-ffmpeg>=0.4.9",
     "opencv-python>=4.8.0",
 ]
 observability = [

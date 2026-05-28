@@ -36,7 +36,7 @@ pynvml  # MLflow GPU system-metrics sampler
 
 # Video / image utils
 imageio
-imageio[ffmpeg]
+imageio-ffmpeg
 opencv-python
 
 # Development

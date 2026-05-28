@@ -127,12 +127,14 @@ class RandomDemoDataset(Dataset):
             result = {
                 "input_ids": enc["input_ids"].squeeze(0),
                 "attention_mask": enc["attention_mask"].squeeze(0),
-                "pixel_values": enc["pixel_values"].squeeze(0),
+                # Keep image axis: processor returns [N_images, P, D]; collate
+                # concatenates on dim 0 → HF expects [B*N, P, D].
+                "pixel_values": enc["pixel_values"],
                 "state": state,
                 "actions": actions,
             }
             if "image_position_ids" in enc:
-                result["image_position_ids"] = enc["image_position_ids"].squeeze(0)
+                result["image_position_ids"] = enc["image_position_ids"]
             if "mm_token_type_ids" in enc:
                 result["mm_token_type_ids"] = enc["mm_token_type_ids"].squeeze(0)
             return result
@@ -157,10 +159,20 @@ class RandomDemoDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """Stack a list of sample dicts into a batch dict."""
+    """Stack a list of sample dicts into a batch dict.
+
+    Image keys (`pixel_values`, `image_position_ids`) carry a per-sample
+    leading "image" axis of size num_cameras, so we concatenate them on
+    dim 0 → [B * num_cameras, ...]. HF Gemma 4 expects this flat layout.
+    Other keys stack normally on a new leading batch axis.
+    """
+    cat_keys = {"pixel_values", "image_position_ids"}
     keys = batch[0].keys()
     collated = {}
     for k in keys:
         tensors = [b[k] for b in batch]
-        collated[k] = torch.stack(tensors, dim=0)
+        if k in cat_keys:
+            collated[k] = torch.cat(tensors, dim=0)
+        else:
+            collated[k] = torch.stack(tensors, dim=0)
     return collated

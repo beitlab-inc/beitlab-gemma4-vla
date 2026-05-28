@@ -32,6 +32,9 @@ Additional modules you need to touch when training on new data:
 How the model connects to robotic environments:
 
 9. [**Simulation pipeline**](08_simulation.md) — MetaWorld + MuJoCo + Gymnasium integration, data collection, evaluation, observability
+10. [**Training with multiple cameras**](09_multi_camera.md) — end-to-end collect / train / test with N views, including the MetaWorld eval caveat
+11. [**Multi-camera two-stage training**](10_multi_camera_two_stage.md) — Stage 1 (cache features + expert-only) → Stage 2 (LoRA + `--init-from`), with composite loss-curve picture and pitfalls
+12. [**Architecture & freeze-map diagrams**](11_architecture_diagrams.md) — Mermaid diagrams of Gemma 4, Gemma4VLA, and color-coded freeze maps for each training strategy
 
 ---
 
@@ -47,6 +50,9 @@ How the model connects to robotic environments:
 | 6 | [`train.py`](06_training.md) | Training loop | AdamW + cosine schedule, LoRA, feature caching |
 | 7 | [`inference.py`](07_inference.md) | Real-time policy execution | Action chunking, replanning |
 | 8 | [Simulation pipeline](08_simulation.md) | MetaWorld + MuJoCo + Gymnasium | Env wrapper, data collection, eval |
+| 9 | [Multi-camera workflow](09_multi_camera.md) | Collect / train / test with N camera views | `vision.num_cameras` + `camera_names`, prompt sizing |
+| 10 | [Multi-cam two-stage training](10_multi_camera_two_stage.md) | Cached Stage 1 + LoRA Stage 2 with `--init-from` | Why caching is valid only with `freeze_backbone`, why LoRA-B=0 makes the seam continuous |
+| 11 | [Architecture & freeze diagrams](11_architecture_diagrams.md) | Visual reference: Gemma 4, Gemma4VLA, per-strategy freeze maps | Mermaid color-coded by trainable/frozen/LoRA |
 
 ---
 

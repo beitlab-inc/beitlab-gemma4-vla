@@ -442,6 +442,169 @@ mlflow.end()
 
 ---
 
+## Monitoring workflow on a remote server
+
+This section covers the typical "headless Jetson Thor + laptop viewer" setup
+where the **Thor runs collect / train / test** and a **second machine** (laptop
+or workstation) is used to inspect Rerun traces and the MLflow UI through SSH.
+
+The pattern is the same in every case: **Thor writes artefacts to disk**
+(`.rrd` files for Rerun, MLflow runs into Postgres + `mlflow-artifacts` volume),
+and the **viewer machine reaches them over SSH** — either by port-forwarding
+the running MLflow server, or by replaying / streaming the saved `.rrd` files.
+
+> Throughout this section we assume:
+> - **thor** is the Jetson Thor (training machine), reachable as
+>   `user@thor.local` over SSH
+> - **laptop** is your viewer machine (Rerun + browser)
+> - the repo is checked out at `~/beitlab-gemma4-vla` on both machines
+
+---
+
+### 1. On the Jetson Thor — collect / train / test
+
+All three commands write `.rrd` files into `rerun/` and (for train/test) log
+metrics + artefacts to the locally-running MLflow container.
+
+**Start the MLflow server once** (Postgres-backed, persistent):
+
+```bash
+# On thor
+cd ~/beitlab-gemma4-vla
+docker compose -f docker-compose.mlflow.yml up -d
+# MLflow UI is now served on http://thor:5001
+```
+
+**Collect demonstrations** — save a Rerun trace of the scripted expert:
+
+```bash
+# On thor
+uv run python -m robots.metaworld.scripts.collect_data \
+    --env-name push-v3 --camera-name corner \
+    --episodes 100 \
+    --instruction "push the object to the goal" \
+    --output-dir data/push_demos \
+    --rerun-mode save \
+    --rerun-path rerun/collect_push.rrd
+```
+
+**Train** with MLflow logging to the local server:
+
+```bash
+# On thor
+uv run python -m robots.metaworld.scripts.train \
+    --config robots/metaworld/configs/metaworld_push.yaml \
+    --data-dir data/push_demos \
+    --metrics-path metrics/train.jsonl \
+    --mlflow \
+    --mlflow-tracking-uri http://127.0.0.1:5001 \
+    --mlflow-experiment gemma4-vla-push \
+    --mlflow-log-artifacts \
+    --mlflow-system-metrics
+```
+
+**Evaluate** and save a validation Rerun trace + MLflow run:
+
+```bash
+# On thor
+uv run python -m robots.metaworld.scripts.test \
+    --checkpoint checkpoints/metaworld_push/best \
+    --env-name push-v3 --camera-name corner \
+    --episodes 10 \
+    --rerun-mode save \
+    --rerun-path rerun/eval_push.rrd \
+    --mlflow \
+    --mlflow-tracking-uri http://127.0.0.1:5001 \
+    --mlflow-experiment gemma4-vla-eval \
+    --mlflow-log-artifacts
+```
+
+After these runs, on the Thor you have:
+
+```
+~/beitlab-gemma4-vla/rerun/collect_push.rrd   # scripted-expert episodes
+~/beitlab-gemma4-vla/rerun/eval_push.rrd      # validation rollouts
+~/beitlab-gemma4-vla/checkpoints/...          # trained checkpoint
+# plus the MLflow server on thor:5001 (train + eval runs)
+```
+
+---
+
+### 2. On the viewer machine — watch over SSH
+
+**a) MLflow UI in your browser via SSH port-forward.**
+Forward the Thor's MLflow port to localhost on the laptop:
+
+```bash
+# On laptop
+ssh -N -L 5001:127.0.0.1:5001 user@thor.local
+# Then open http://localhost:5001 — you'll see both training and eval runs
+```
+
+Leave the tunnel running while you browse runs, compare metrics, and download
+artefacts (checkpoints, metrics JSON, videos) directly from the UI.
+
+**b) Replay a saved `.rrd` from the Thor without copying it.**
+The cleanest path is to mount the Thor's `rerun/` directory over SSHFS so the
+local Rerun viewer can open remote files transparently:
+
+```bash
+# On laptop (one-time)
+sshfs user@thor.local:/home/user/beitlab-gemma4-vla/rerun ~/thor-rerun
+
+# Replay the validation rollouts in the Rerun viewer
+uv run rerun ~/thor-rerun/eval_push.rrd
+
+# Or replay the collection trace
+uv run rerun ~/thor-rerun/collect_push.rrd
+```
+
+If SSHFS isn't available, just `scp` the file once and open it locally:
+
+```bash
+# On laptop
+scp user@thor.local:~/beitlab-gemma4-vla/rerun/eval_push.rrd ./eval_push.rrd
+uv run rerun ./eval_push.rrd
+```
+
+**c) Stream a *live* run from Thor to the laptop viewer.**
+Use `--rerun-mode connect` on the Thor instead of `save`, and forward Rerun's
+gRPC port (9876) from the laptop to the Thor:
+
+```bash
+# On laptop — open viewer first and forward port
+uv run rerun &                                       # opens the Rerun viewer
+ssh -N -R 9876:127.0.0.1:9876 user@thor.local       # reverse-tunnel viewer to thor
+```
+
+```bash
+# On thor — point the run at the tunnel
+uv run python -m robots.metaworld.scripts.test \
+    --checkpoint checkpoints/metaworld_push/best \
+    --env-name push-v3 --episodes 5 \
+    --rerun-mode connect \
+    --rerun-connect-url 127.0.0.1:9876
+```
+
+Each step is streamed in real time to the viewer on the laptop. Use `save` for
+durable runs you want to revisit; use `connect` when you want to babysit a run
+as it executes.
+
+---
+
+### 3. Quick reference
+
+| Goal | Where you run it | Command |
+|------|------------------|---------|
+| Save a Rerun trace during data collection | thor | `collect_data ... --rerun-mode save --rerun-path rerun/collect.rrd` |
+| Save a Rerun trace during evaluation | thor | `test ... --rerun-mode save --rerun-path rerun/eval.rrd` |
+| Log training to MLflow | thor | `train ... --mlflow --mlflow-tracking-uri http://127.0.0.1:5001` |
+| View MLflow runs remotely | laptop | `ssh -N -L 5001:127.0.0.1:5001 user@thor` → `http://localhost:5001` |
+| Replay a stored `.rrd` from Thor | laptop | `sshfs` mount, then `uv run rerun <path/to/file.rrd>` |
+| Stream a live run from Thor | laptop + thor | reverse-forward `9876`, then `--rerun-mode connect --rerun-connect-url 127.0.0.1:9876` |
+
+---
+
 ## Configuration
 
 Gemma4VLA uses dataclass-based configuration.  Pre-built configs:

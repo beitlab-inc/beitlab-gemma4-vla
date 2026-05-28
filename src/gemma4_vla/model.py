@@ -239,11 +239,19 @@ class Gemma4Backbone(nn.Module):
 
         # Optionally apply LoRA (only when backbone is not fully frozen)
         if bk.use_lora and not bk.freeze_backbone:
+            # Pre-freeze the entire backbone. PEFT's get_peft_model only
+            # touches the submodule it wraps (the language model) — the
+            # vision tower, multi-modal projector, lm_head, embed_tokens,
+            # and norms outside that submodule stay trainable unless we
+            # freeze them here first. _apply_lora then re-enables only the
+            # LoRA adapter parameters it injects.
+            for p in self.model.parameters():
+                p.requires_grad_(False)
             self._apply_lora(bk)
 
-        # Freeze vision tower independently — important for LoRA mode
-        # where PEFT only freezes the language model, leaving vision
-        # tower accidentally unfrozen.
+        # Freeze vision tower independently — important for full-finetune
+        # mode (use_lora=False, freeze_vision=True). In LoRA mode the
+        # pre-freeze above already covers it; this is a no-op there.
         vis = cfg.vision
         if vis.freeze_vision and not bk.freeze_backbone:
             self._freeze_vision_tower()
@@ -288,19 +296,26 @@ class Gemma4Backbone(nn.Module):
     def _freeze_vision_tower(self):
         """Freeze the vision tower parameters.
 
-        In LoRA mode, PEFT only freezes the language model.  The vision
-        tower (SigLIP2) would remain unfrozen unless we freeze it
-        explicitly here.  Full fine-tuning with freeze_vision=False
-        skips this call entirely.
+        Used by the full-finetune path (use_lora=False, freeze_vision=True)
+        to keep SigLIP2 frozen while the rest of the backbone trains. In
+        LoRA mode the pre-freeze in __init__ already covers this.
+
+        Gemma4ForConditionalGeneration nests vision_tower / embed_vision
+        on the inner Gemma4Model (self.model.model.X), so we probe both
+        the outer and inner module to be robust to either layout.
         """
+        candidates = []
+        for root in (self.model, getattr(self.model, "model", None)):
+            if root is None:
+                continue
+            for attr in ("vision_tower", "embed_vision"):
+                submod = getattr(root, attr, None)
+                if submod is not None:
+                    candidates.append((attr, submod))
+
         frozen = 0
-        if hasattr(self.model, "vision_tower"):
-            for p in self.model.vision_tower.parameters():
-                p.requires_grad_(False)
-                frozen += p.numel()
-        # Also freeze the vision embedder / projector if present
-        if hasattr(self.model, "embed_vision"):
-            for p in self.model.embed_vision.parameters():
+        for _attr, submod in candidates:
+            for p in submod.parameters():
                 p.requires_grad_(False)
                 frozen += p.numel()
         if frozen > 0:

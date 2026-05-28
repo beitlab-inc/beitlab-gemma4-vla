@@ -191,12 +191,14 @@ class MetaWorldHDF5Dataset(Dataset):
             result = {
                 "input_ids": enc["input_ids"].squeeze(0),
                 "attention_mask": enc["attention_mask"].squeeze(0),
-                "pixel_values": enc["pixel_values"].squeeze(0),
+                # Keep the image axis: processor returns [N_images, P, D]; the
+                # collate fn concatenates on dim 0 → HF expects [B*N, P, D].
+                "pixel_values": enc["pixel_values"],
                 "state": state,
                 "actions": actions,
             }
             if "image_position_ids" in enc:
-                result["image_position_ids"] = enc["image_position_ids"].squeeze(0)
+                result["image_position_ids"] = enc["image_position_ids"]
             if "mm_token_type_ids" in enc:
                 result["mm_token_type_ids"] = enc["mm_token_type_ids"].squeeze(0)
             return result
@@ -250,12 +252,22 @@ def build_metaworld_dataloaders(
 
     tr = cfg.training
     pin = torch.cuda.is_available()  # pin_memory is CUDA-only (not MPS)
+    # persistent_workers=True keeps train workers alive across epoch boundaries
+    # so they don't refork from a now-huge parent process (model + optimiser
+    # state). Required on unified-memory hardware (Jetson Thor) where each
+    # fork materialises several GB via copy-on-write + Python refcount churn.
     train_loader = DataLoader(
         train_ds, batch_size=tr.batch_size, shuffle=True,
         collate_fn=collate_fn, pin_memory=pin, num_workers=tr.num_workers,
+        persistent_workers=tr.num_workers > 0,
+        prefetch_factor=tr.prefetch_factor if tr.num_workers > 0 else None,
     )
+    # Val loop runs <= 50 batches every eval_every_n_steps. Forking workers
+    # for it spikes RAM at the eval boundary (worker count doubles since the
+    # train workers are still alive). Serial loading adds ~seconds per eval,
+    # negligible vs. the Stage-2 step cost, so num_workers=0 wins on safety.
     val_loader = DataLoader(
         val_ds, batch_size=tr.batch_size, shuffle=False,
-        collate_fn=collate_fn, pin_memory=pin, num_workers=tr.num_workers,
+        collate_fn=collate_fn, pin_memory=False, num_workers=0,
     )
     return train_loader, val_loader

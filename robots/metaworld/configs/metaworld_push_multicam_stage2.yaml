@@ -1,0 +1,62 @@
+# ================================================================
+# Multi-camera — Stage 2: Joint fine-tuning (LoRA + expert)
+# ================================================================
+# Second half of the two-stage recipe (docs/06_training.md §8).
+# Loads Stage 1's checkpoint via --init-from and continues with
+# LoRA adapters unfrozen on the backbone.
+#
+# Run (after Stage 1 finishes):
+#   uv run python -m robots.metaworld.scripts.train \
+#       --config robots/metaworld/configs/metaworld_push_multicam_stage2.yaml \
+#       --data-dir data/push_demos_multicam \
+#       --init-from checkpoints/metaworld_push_multicam_stage1/final
+
+vision:
+  num_cameras: 3
+  camera_names: ["topview", "corner", "gripperPOV"]
+  image_size: 224
+  freeze_vision: true            # vision tower stays frozen even in Stage 2
+
+backbone:
+  model_name: "google/gemma-4-E2B-it"
+  freeze_backbone: false         # backbone unfrozen (LoRA handles freezing)
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32.0
+  lora_target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+  max_sequence_length: 1024      # match Stage 1 — must equal cached-feature length
+
+action_expert:
+  hidden_size: 1024
+  num_layers: 8
+  num_heads: 16
+
+flow_matching:
+  action_horizon: 50
+  num_inference_steps: 10
+
+robot:
+  name: "metaworld-push"
+  state_dim: 39
+  action_dim: 4
+  max_state_dim: 39
+
+training:
+  learning_rate: 0.0002          # lower LR for joint fine-tune
+  backbone_lr_multiplier: 0.05   # LoRA trains 20x slower than expert
+  batch_size: 8                  # 3 cams ~doubles activation memory vs 1 cam
+  grad_accum_steps: 2            # effective batch = 16
+  max_steps: 30000               # 10k-100k per the recipe; 30k is a safe default
+  warmup_steps: 500
+  grad_clip_norm: 1.0
+  mixed_precision: "bf16"
+  gradient_checkpointing: true   # backbone unfrozen — checkpoint to save VRAM
+  eval_every_n_steps: 500
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.001
+  output_dir: "./checkpoints/metaworld_push_multicam_stage2"
+  dataset_root: "./data/push_demos_multicam"

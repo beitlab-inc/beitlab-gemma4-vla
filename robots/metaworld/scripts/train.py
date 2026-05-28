@@ -12,6 +12,7 @@ import argparse
 import os
 
 from gemma4_vla.config import metaworld_push_config
+from gemma4_vla.model import Gemma4VLA
 from gemma4_vla.train import train, load_config_from_yaml
 from gemma4_vla.observability import MlflowRun
 from gemma4_vla.machine_config import MachineProfile, EnvironmentConfig, apply_machine_defaults
@@ -38,6 +39,12 @@ def parse_args():
                         help="Compute dataset-fit normalisation stats once before training, "
                              "normalise inputs during training, and save normalization.pt next "
                              "to the checkpoint so inference can denormalise symmetrically.")
+    parser.add_argument("--init-from", type=str, default=None,
+                        help="Path to a previous checkpoint directory (containing config.json "
+                             "and weights.pt) to initialise model weights from. Used to chain "
+                             "Stage 1 (expert-only) into Stage 2 (LoRA) of the two-stage recipe. "
+                             "Matching parameter names are loaded with strict=False so a "
+                             "Stage-1 checkpoint can seed a Stage-2 config that adds LoRA.")
     parser.add_argument("--metrics-path", type=str, default=None,
                         help="Optional JSONL path for training metrics")
     parser.add_argument("--mlflow", action="store_true",
@@ -116,8 +123,15 @@ def main():
         "batch_size": cfg.training.batch_size,
     })
 
+    init_model = None
+    if args.init_from:
+        if _is_rank_0():
+            print(f"Initialising model from checkpoint: {args.init_from}")
+        init_model = Gemma4VLA.from_pretrained(args.init_from, cfg=cfg)
+
     model = train(
         cfg,
+        model=init_model,
         train_loader=train_loader,
         val_loader=val_loader,
         metrics_path=args.metrics_path,

@@ -241,12 +241,12 @@ def train(
     if model is None:
         logger.info("Initialising Gemma4VLA...")
         model = Gemma4VLA(cfg)
-        try:
-            model = model.to(device)
-        except NotImplementedError:
-            # Backbone loaded with device_map="auto"; move only non-backbone parts
-            model.obs_proj = model.obs_proj.to(device)
-            model.action_expert = model.action_expert.to(device)
+    try:
+        model = model.to(device)
+    except NotImplementedError:
+        # Backbone loaded with device_map="auto"; move only non-backbone parts
+        model.obs_proj = model.obs_proj.to(device)
+        model.action_expert = model.action_expert.to(device)
 
     # --- Gradient checkpointing (saves memory, trades compute) ---
     if tr.gradient_checkpointing:
